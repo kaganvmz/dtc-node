@@ -1,0 +1,10 @@
+{
+    "proxy_source": "file",
+    "proxy_file": "./proxies.txt",
+    "proxy_change_by_url": true,
+    "host": "gate.multilogin.com", 
+    "password": "x0sxun0ssc",
+    "port": 1080, 
+    "type": "socks5", 
+    "username": "fallback-username-{session_string}"
+}

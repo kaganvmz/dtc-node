@@ -1,0 +1,10 @@
+{
+    "proxy_source": "config",
+    "host": "gate.multilogin.com", 
+    "password": "x0sxun0ssc",
+    "port": 1080, 
+    "type": "socks5", 
+    "username": "2235440328_ab94f23e_bbdc_41c6_b3a5_146189889db5_multilogin_com-country-gb-region-england-sid-{session_string}-filter-medium",
+    "proxy_change_by_url": false,
+    "proxy_file": "./proxies.txt"
+}
