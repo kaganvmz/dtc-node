@@ -172,13 +172,17 @@ class SimpleLoginBot {
   // СОЗДАНИЕ/ПОИСК ПРОФИЛЯ
   // ===============================
   async createProfile(profileName) {
-    console.log(`🔍 Создание/поиск профиля: ${profileName}`);
+    const reuseProfileName = this.multiloginAPI.browserProfileName || null;
+    const searchProfileName = reuseProfileName || profileName;
+    console.log(`🔍 Создание/поиск профиля: ${searchProfileName}`);
 
     try {
       // Поиск существующего профиля
-      const searchResult = await this.multiloginAPI.searchProfile(profileName);
+      const searchResult = await this.multiloginAPI.searchProfile(searchProfileName);
+      const profiles = Array.isArray(searchResult?.data?.profiles) ? searchResult.data.profiles : [];
+      const matchedProfile = profiles.find((p) => p?.name === searchProfileName);
 
-      if (searchResult.data && searchResult.data.profiles === null) {
+      if (!matchedProfile) {
         // Профиль не найден - создаем новый
         console.log("📝 Создание нового профиля...");
         const currentProxy = this.multiloginAPI.getCurrentProxy();
@@ -190,17 +194,16 @@ class SimpleLoginBot {
           'mimic'
         );
 
-        if (createResult.status.http_code === 201) {
+        if (createResult?.status?.http_code === 201 && Array.isArray(createResult?.data?.ids) && createResult.data.ids.length > 0) {
           const profileId = createResult.data.ids[0];
           console.log(`✅ Профиль создан с ID: ${profileId}`);
           return profileId;
         } else {
-          throw new Error(`Ошибка создания профиля: ${createResult.status.message}`);
+          throw new Error(`Ошибка создания профиля: ${createResult?.status?.message || 'Некорректный ответ API'}`);
         }
       } else {
         // Профиль найден
-        const profile = searchResult.data.profiles.find(p => p.name === profileName);
-        const profileId = profile.id;
+        const profileId = matchedProfile.id;
         console.log(`✅ Профиль найден с ID: ${profileId}`);
         return profileId;
       }

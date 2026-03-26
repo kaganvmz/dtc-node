@@ -35,8 +35,10 @@ export class MultiloginAPI {
     this.username = username;
     this.password = password;
     this.defaultFolder = "ab94f23e-bbdc-41c6-b3a5-146189889db5";
+    this.defaultCoreVersion = Number(process.env.MULTILOGIN_CORE_VERSION || 146);
     this.proxyManager = new ProxyManager(1);
     this.currentProxyConfig = null;
+    this.browserProfileName = process.env.BROWSER_PROFILE_NAME || null;
   }
 
   /**
@@ -45,7 +47,7 @@ export class MultiloginAPI {
    */
   async apiInit() {
     console.log("Attempting to sign in to Multilogin API...");
-    
+
     // Using Node.js built-in crypto module for MD5 hashing
     const hashedPassword = crypto.createHash('md5').update(this.password).digest('hex');
 
@@ -107,7 +109,7 @@ export class MultiloginAPI {
           await this.apiInit();
           continue; // Retry the request with the new token
         }
-        
+
         return jsonResponse;
       } catch (error) {
         // Handle network or other errors here
@@ -148,8 +150,9 @@ export class MultiloginAPI {
       name: profileName,
       browser_type: browserType,
       folder_id: this.defaultFolder,
+      core_version: this.defaultCoreVersion,
       os_type: "windows",
-      auto_update_core: false,
+      proxy: proxy,
       parameters: {
         flags: {
           audio_masking: "mask",
@@ -166,21 +169,26 @@ export class MultiloginAPI {
           screen_masking: "mask",
           timezone_masking: "mask",
           webrtc_masking: "mask",
-          "canvas_noise:": "mask",
-          startup_behavior: "custom",
+          canvas_noise: "mask",
         },
-        custom_start_urls: ["http://ip-api.com/json"],
-        storage: { is_local: false },
+        storage: { is_local: false, save_service_worker: true },
         fingerprint: {},
-        proxy: proxy,
       },
     };
     const res = await fetch(`${this.#apiServer}${this.#createEndpoint}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...this.#httpHeaders },
+      headers: { "Content-Type": "application/json", "Accept": "application/json", ...this.#httpHeaders },
       body: JSON.stringify(data),
     });
-    return res.json();
+    const bodyText = await res.text();
+    try {
+      return JSON.parse(bodyText);
+    } catch (error) {
+      const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 220);
+      throw new MultiloginException(
+        `Create profile failed: HTTP ${res.status} ${res.statusText}. Body preview: ${preview}`
+      );
+    }
   }
 
   /**
@@ -201,7 +209,7 @@ export class MultiloginAPI {
     });
     return res.json();
   }
-  
+
   /**
    * Starts a profile.
    * @param {string} profileId - The ID of the profile to start.
@@ -215,7 +223,7 @@ export class MultiloginAPI {
       headless_mode: headlessMode,
     });
     const finalFolderId = folderId || this.defaultFolder;
-    
+
     return this.#makeRequest(() =>
       fetch(`${this.#launcherServer}/v2/profile/f/${finalFolderId}/p/${profileId}/start?${params.toString()}`, {
         method: "GET",
@@ -283,11 +291,11 @@ export class MultiloginAPI {
     if (!searchResult?.data?.profiles || !Array.isArray(searchResult.data.profiles)) {
       return null;
     }
-    
-    const profile = searchResult.data.profiles.find(profile => 
+
+    const profile = searchResult.data.profiles.find(profile =>
       profile && profile.name === profileName
     );
-    
+
     return profile ? profile.id : null;
   }
 
@@ -335,15 +343,15 @@ export class MultiloginAPI {
    */
   async updateProfileProxyWithRotation(profileId, proxyConfig = null, maxRetries = 3) {
     let currentProxy = proxyConfig || this.getCurrentProxy();
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`🔧 Updating profile proxy (attempt ${attempt}/${maxRetries})...`);
-        
+
         // Format proxy for Multilogin
         const formattedProxy = this.proxyManager.formatForMultilogin(currentProxy);
         const result = await this.updateProfileProxy(profileId, formattedProxy);
-        
+
         if (result.status?.http_code === 200 || result.status?.http_code === 201) {
           console.log("✅ Profile proxy updated successfully");
           this.currentProxyConfig = currentProxy;
@@ -351,10 +359,10 @@ export class MultiloginAPI {
         } else {
           throw new Error(`Proxy update failed: ${result.status?.message || 'Unknown error'}`);
         }
-        
+
       } catch (error) {
         console.warn(`❌ Proxy update attempt ${attempt} failed: ${error.message}`);
-        
+
         if (attempt < maxRetries) {
           // Rotate to next proxy for retry
           currentProxy = this.rotateProxy();
@@ -378,24 +386,24 @@ export class MultiloginAPI {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`🚀 Starting profile with proxy rotation (attempt ${attempt}/${maxRetries})...`);
-        
+
         const result = await this.startProfile(profileId, folderId, headlessMode);
-        
+
         // Check for proxy-related errors
         if (result.status?.error_code === 'GET_PROXY_CONNECTION_IP_ERROR') {
           throw new Error('Proxy connection error');
         }
-        
+
         if (result.status?.http_code === 200) {
           console.log("✅ Profile started successfully with current proxy");
           return result;
         } else {
           throw new Error(`Profile start failed: ${result.status?.message || 'Unknown error'}`);
         }
-        
+
       } catch (error) {
         console.warn(`❌ Profile start attempt ${attempt} failed: ${error.message}`);
-        
+
         if (attempt < maxRetries) {
           // Rotate proxy and update profile
           const newProxy = this.rotateProxy();
