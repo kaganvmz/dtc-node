@@ -328,16 +328,16 @@ class SimpleLoginBot {
       console.log("🔄 Ожидание загрузки iframe с капчей...");
       await page.waitForFunction(() => {
         const iframe = document.getElementById("main-iframe");
-        return iframe && 
-               iframe.contentWindow && 
-               iframe.contentWindow.document && 
+        return iframe &&
+               iframe.contentWindow &&
+               iframe.contentWindow.document &&
                iframe.contentWindow.document.readyState === 'complete' &&
                iframe.contentWindow.location.href !== 'about:blank';
       }, { timeout: 15000 });
-      
+
       // Дополнительная пауза для загрузки капчи
       await this.sleep(3000);
-      
+
       const captchaData = await page.evaluate(() => {
         const targetIframe = document.getElementById("main-iframe");
         // Если iframe не найден или его contentWindow недоступен
@@ -352,7 +352,7 @@ class SimpleLoginBot {
         }
 
         const siteurl = iframeDocument.location.href;
-        
+
         // Проверяем различные селекторы для hCaptcha
         let hcaptchaElements = iframeDocument.getElementsByClassName("h-captcha");
         if (hcaptchaElements.length === 0) {
@@ -362,25 +362,25 @@ class SimpleLoginBot {
         if (hcaptchaElements.length === 0) {
           hcaptchaElements = iframeDocument.querySelectorAll('.h-captcha, [class*="captcha"], [id*="captcha"]');
         }
-        
+
         if (hcaptchaElements.length === 0) {
           console.log('Iframe content:', iframeDocument.documentElement.outerHTML.substring(0, 500));
           return { "sitekey": null, "siteurl": siteurl, "ua": window.navigator.userAgent, "status": "no-captcha" };
         }
-        
+
         console.log('hcaptchaElements found:', hcaptchaElements.length);
         console.log('First element:', hcaptchaElements[0]);
-        
+
         // Извлекаем sitekey из первого найденного элемента
         let sitekey = hcaptchaElements[0].getAttribute("data-sitekey");
-        
+
         // Если sitekey не найден в data-sitekey, ищем в других атрибутах
         if (!sitekey) {
-          sitekey = hcaptchaElements[0].getAttribute("site-key") || 
+          sitekey = hcaptchaElements[0].getAttribute("site-key") ||
                    hcaptchaElements[0].getAttribute("sitekey") ||
                    hcaptchaElements[0].dataset.sitekey;
         }
-        
+
         console.log('Extracted sitekey:', sitekey);
         return { "sitekey": sitekey, "siteurl": siteurl, "ua": window.navigator.userAgent, "status": "ready" };
       });
@@ -426,29 +426,29 @@ class SimpleLoginBot {
   async checkLoginForm(page) {
     try {
       console.log("🔄 Ожидание полной загрузки всех скриптов...");
-      
+
       // Ждем загрузки всех скриптов и готовности DOM
       await page.waitForLoadState('networkidle', { timeout: 15000 });
-      
+
       // Ждем выполнения jQuery и других скриптов
       await page.waitForFunction(() => {
-        return typeof window.jQuery !== 'undefined' && 
+        return typeof window.jQuery !== 'undefined' &&
                document.readyState === 'complete' &&
                !document.querySelector('.loading') && // нет элементов загрузки
-               window.jQuery && 
+               window.jQuery &&
                window.jQuery.isReady; // jQuery готов
       }, { timeout: 10000 });
-      
+
       // Дополнительная пауза для полной инициализации
       await this.sleep(3000);
-      
+
       console.log("✅ Скрипты загружены, проверяем форму...");
-      
+
       // Ждем появления элементов формы с увеличенным таймаутом
       await page.waitForSelector('#driving-licence-number', { timeout: 10000, state: 'visible' });
       await page.waitForSelector('#application-reference-number', { timeout: 10000, state: 'visible' });
       await page.waitForSelector('#booking-login', { timeout: 10000, state: 'visible' });
-      
+
       // Проверяем наличие основных элементов формы логина
       const licenseField = await page.locator('#driving-licence-number').isVisible({ timeout: 3000 });
       const referenceField = await page.locator('#application-reference-number').isVisible({ timeout: 3000 });
@@ -465,26 +465,26 @@ class SimpleLoginBot {
 
     } catch (error) {
       console.warn("⚠️ Ошибка проверки формы логина:", error.message);
-      
+
       // Отладочная информация при ошибке
       try {
         const currentUrl = page.url();
         console.log(`🔍 Текущий URL: ${currentUrl}`);
-        
+
         const pageTitle = await page.title();
         console.log(`📄 Заголовок страницы: ${pageTitle}`);
-        
+
         // Проверяем, есть ли элементы в DOM (даже если невидимы)
         const licenseExists = await page.locator('#driving-licence-number').count();
         const referenceExists = await page.locator('#application-reference-number').count();
         const loginExists = await page.locator('#booking-login').count();
-        
+
         console.log(`🔍 Элементы в DOM: лицензия=${licenseExists}, референс=${referenceExists}, кнопка=${loginExists}`);
-        
+
       } catch (debugError) {
         console.warn("⚠️ Ошибка получения отладочной информации:", debugError.message);
       }
-      
+
       return false;
     }
   }
@@ -557,7 +557,7 @@ class SimpleLoginBot {
         try {
           await this.solveCaptcha(page);
           console.log("✅ Капча после промежуточной страницы решена успешно");
-          
+
           // Дополнительная пауза после решения капчи
           await this.sleep(3000);
         } catch (captchaError) {
@@ -582,7 +582,7 @@ class SimpleLoginBot {
           try {
             await this.solveCaptcha(page);
             console.log("✅ Капча после логина решена успешно");
-            
+
             // Дополнительная пауза после решения капчи
             await this.sleep(3000);
           } catch (captchaError) {
@@ -594,7 +594,7 @@ class SimpleLoginBot {
         }
 
         console.log("🔍 Проверяем страницу View booking...");
-        
+
         // Проверка страницы View booking (только после решения капчи)
         const isViewBookingPage = await this.checkViewBookingPage(page);
 
@@ -610,10 +610,10 @@ class SimpleLoginBot {
 
             if (isTestCentrePage) {
               console.log("🎉 Успешно попали на страницу Test centre, начинаем поиск...");
-              
+
               // Выполняем поиск тест-центра
               const searchSuccess = await this.searchTestCentre(page, loginData);
-              
+
               if (searchSuccess) {
                 console.log("🎉 Полный workflow завершен успешно: Login → View Booking → Test Centre → Search");
                 return { success: true, message: "Successfully completed test centre search" };
@@ -1516,7 +1516,8 @@ class SimpleLoginBot {
       if (this.tasksAPI) {
         const cancelResult = await this.tasksAPI.cancelTask(task.id, {
           isLimit: false,
-          isAuthError: true
+          isAuthError: true,
+          error: errorMessage
         });
 
         // TasksAPI.cancelTask возвращает response напрямую, без поля success
@@ -1581,22 +1582,22 @@ class SimpleLoginBot {
 
       // Берем первый тест-центр из задачи
       const testCentreName = loginData.testCenters[0];
-      
+
       // Ищем соответствующий почтовый код в наших данных
       const postcode = testCentresData[testCentreName];
-      
+
       if (!postcode) {
         // Если точного совпадения нет, попробуем найти по частичному совпадению
-        const possibleMatches = Object.keys(testCentresData).filter(name => 
+        const possibleMatches = Object.keys(testCentresData).filter(name =>
           name.toLowerCase().includes(testCentreName.toLowerCase()) ||
           testCentreName.toLowerCase().includes(name.toLowerCase())
         );
-        
+
         if (possibleMatches.length > 0) {
           const matchedName = possibleMatches[0];
           const matchedPostcode = testCentresData[matchedName];
           console.log(`🎯 Найдено частичное совпадение: "${testCentreName}" → "${matchedName}" (${matchedPostcode})`);
-          
+
           // Используем найденное совпадение
           await this.performTestCentreSearch(page, matchedPostcode, testCentreName);
         } else {
@@ -1652,7 +1653,7 @@ class SimpleLoginBot {
 
       // Анализируем результаты поиска и обрабатываем их
       const searchSuccess = await this.processSearchResults(page, testCentreName, searchTerm);
-      
+
       return searchSuccess;
 
     } catch (error) {
@@ -1667,19 +1668,19 @@ class SimpleLoginBot {
   async processSearchResults(page, testCentreName, searchTerm) {
     try {
       console.log(`🔍 Обработка результатов поиска для тест-центра: "${testCentreName}"`);
-      
+
       const maxAttempts = 3;
       const maxShowMoreClicks = 2;
-      
+
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         console.log(`📋 Попытка ${attempt}/${maxAttempts} обработки результатов`);
-        
+
         // Анализируем текущие результаты поиска
         const analysisResult = await this.analyzeSearchResults(page, testCentreName);
-        
+
         if (analysisResult.found && analysisResult.hasAvailableTests) {
           console.log(`✅ Найден тест-центр "${testCentreName}" с доступными датами`);
-          
+
           // Кликаем по тест-центру с доступными датами
           const clickSuccess = await this.clickTestCentreIfAvailable(page, analysisResult.element);
           if (clickSuccess) {
@@ -1688,12 +1689,12 @@ class SimpleLoginBot {
           }
         } else if (analysisResult.found && !analysisResult.hasAvailableTests) {
           console.log(`⚠️ Тест-центр "${testCentreName}" найден, но нет доступных дат`);
-          
+
           // Пробуем "Show more results" несколько раз
           let showMoreSuccess = false;
           for (let showMoreAttempt = 1; showMoreAttempt <= maxShowMoreClicks; showMoreAttempt++) {
             console.log(`🔄 Пробуем "Show more results" (${showMoreAttempt}/${maxShowMoreClicks})`);
-            
+
             const moreResultsSuccess = await this.handleNoTestsFound(page);
             if (moreResultsSuccess) {
               // Повторно анализируем результаты после загрузки дополнительных
@@ -1710,7 +1711,7 @@ class SimpleLoginBot {
         } else {
           console.log(`❌ Тест-центр "${testCentreName}" не найден в результатах поиска`);
         }
-        
+
         // Если не удалось найти или нет доступных дат, пробуем повторить поиск
         if (attempt < maxAttempts) {
           console.log("🔄 Повторяем поиск с тем же поисковым термином...");
@@ -1721,10 +1722,10 @@ class SimpleLoginBot {
           }
         }
       }
-      
+
       console.log(`❌ Не удалось найти доступные даты для тест-центра "${testCentreName}" после ${maxAttempts} попыток`);
       return false;
-      
+
     } catch (error) {
       console.error("❌ Ошибка обработки результатов поиска:", error.message);
       return false;
@@ -1737,35 +1738,35 @@ class SimpleLoginBot {
   async analyzeSearchResults(page, testCentreName) {
     try {
       console.log(`🔍 Анализ результатов для тест-центра: "${testCentreName}"`);
-      
+
       // Ждем загрузки результатов
       await page.waitForSelector('.test-centre-results', { timeout: 10000 });
-      
+
       // Получаем все элементы тест-центров
       const testCentres = await page.locator('.test-centre-results li').all();
       console.log(`📊 Найдено ${testCentres.length} тест-центров в результатах`);
-      
+
       for (const centre of testCentres) {
         try {
           // Получаем название тест-центра из h4
           const centreNameElement = centre.locator('h4');
           const centreName = await centreNameElement.textContent();
           console.log(`🏢 Проверяем тест-центр: "${centreName}"`);
-          
+
           // Проверяем, соответствует ли это искомому тест-центру
           if (this.isTestCentreNameMatch(centreName, testCentreName)) {
             console.log(`✅ Найдено соответствие: "${centreName}" ~ "${testCentreName}"`);
-            
+
             // Проверяем наличие доступных дат
             const statusElement = centre.locator('h5');
             const statusText = await statusElement.textContent();
             console.log(`📅 Статус дат: "${statusText}"`);
-            
+
             const hasAvailableTests = !statusText.includes('No tests found');
-            
+
             // Получаем ссылку для клика
             const linkElement = centre.locator('a').first();
-            
+
             return {
               found: true,
               hasAvailableTests: hasAvailableTests,
@@ -1779,7 +1780,7 @@ class SimpleLoginBot {
           continue;
         }
       }
-      
+
       console.log(`❌ Тест-центр "${testCentreName}" не найден в результатах`);
       return {
         found: false,
@@ -1788,7 +1789,7 @@ class SimpleLoginBot {
         centreName: null,
         statusText: null
       };
-      
+
     } catch (error) {
       console.error("❌ Ошибка анализа результатов поиска:", error.message);
       return { found: false, hasAvailableTests: false, element: null };
@@ -1800,22 +1801,22 @@ class SimpleLoginBot {
   // ===============================
   isTestCentreNameMatch(foundName, targetName) {
     const normalize = (name) => name.toLowerCase().replace(/[^\w\s]/g, '').trim();
-    
+
     const normalizedFound = normalize(foundName);
     const normalizedTarget = normalize(targetName);
-    
+
     // Точное совпадение
     if (normalizedFound === normalizedTarget) return true;
-    
+
     // Частичное совпадение (один содержит другой)
     if (normalizedFound.includes(normalizedTarget) || normalizedTarget.includes(normalizedFound)) {
       return true;
     }
-    
+
     // Проверяем совпадение основных слов
     const foundWords = normalizedFound.split(/\s+/);
     const targetWords = normalizedTarget.split(/\s+/);
-    
+
     for (const targetWord of targetWords) {
       if (targetWord.length > 3) { // Игнорируем короткие слова
         for (const foundWord of foundWords) {
@@ -1825,7 +1826,7 @@ class SimpleLoginBot {
         }
       }
     }
-    
+
     return false;
   }
 
@@ -1848,11 +1849,11 @@ class SimpleLoginBot {
       // Очищаем поле человекоподобным способом
       if (currentValue && currentValue.length > 0) {
         console.log("🧹 Очищаем поле от предыдущего содержимого...");
-        
+
         // Выделяем весь текст
         await page.keyboard.press('Control+A');
         await this.randomDelay(100, 200);
-        
+
         // Удаляем выделенный текст
         await page.keyboard.press('Delete');
         await this.randomDelay(200, 400);
@@ -1884,48 +1885,48 @@ class SimpleLoginBot {
   async clickTestCentreIfAvailable(page, element) {
     try {
       console.log("🖱️ Кликаем по тест-центру с доступными датами...");
-      
+
       // Проверяем, что элемент доступен для клика
       const isVisible = await element.isVisible({ timeout: 5000 });
       const isEnabled = await element.isEnabled();
-      
+
       if (!isVisible || !isEnabled) {
         console.log(`❌ Элемент недоступен: visible=${isVisible}, enabled=${isEnabled}`);
         return false;
       }
-      
+
       // Скроллим к элементу
       await element.scrollIntoViewIfNeeded();
       await this.randomDelay(500, 1000);
-      
+
       // Человекоподобное движение к элементу и клик
       const box = await element.boundingBox();
       if (box) {
         await this.humanApproachToElement(page, box);
         await this.randomDelay(300, 700);
-        
+
         // Stealth клик
         const clickX = box.x + (box.width * (0.2 + Math.random() * 0.6));
         const clickY = box.y + (box.height * (0.2 + Math.random() * 0.6));
-        
+
         await page.mouse.move(clickX, clickY);
         await this.randomDelay(100, 300);
         await page.mouse.down();
         await this.sleep(50 + Math.random() * 100);
         await page.mouse.up();
-        
+
         console.log("✅ Клик по тест-центру выполнен");
-        
+
         // Ждем навигации на следующую страницу
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
         await this.randomDelay(2000, 4000);
-        
+
         return true;
       } else {
         console.log("❌ Не удалось получить координаты элемента");
         return false;
       }
-      
+
     } catch (error) {
       console.error("❌ Ошибка клика по тест-центру:", error.message);
       return false;
@@ -1938,35 +1939,35 @@ class SimpleLoginBot {
   async handleNoTestsFound(page) {
     try {
       console.log("🔄 Обрабатываем отсутствие доступных дат, ищем 'Show more results'...");
-      
+
       // Имитируем человекоподобные движения мыши (чтение результатов)
       await this.simulateResultsReading(page);
-      
+
       // Ищем кнопку "Show more results"
       const showMoreButton = page.locator('#fetch-more-centres');
       const isVisible = await showMoreButton.isVisible({ timeout: 5000 });
-      
+
       if (!isVisible) {
         console.log("❌ Кнопка 'Show more results' не найдена");
         return false;
       }
-      
+
       console.log("✅ Найдена кнопка 'Show more results', кликаем...");
-      
+
       // Скроллим к кнопке
       await showMoreButton.scrollIntoViewIfNeeded();
       await this.randomDelay(800, 1500);
-      
+
       // Человекоподобный клик по кнопке
       await this.humanClick(page, '#fetch-more-centres');
-      
+
       // Ждем загрузки дополнительных результатов
       await page.waitForLoadState('networkidle', { timeout: 30000 });
       await this.randomDelay(3000, 5000);
-      
+
       console.log("✅ Дополнительные результаты загружены");
       return true;
-      
+
     } catch (error) {
       console.error("❌ Ошибка обработки 'Show more results':", error.message);
       return false;
@@ -1979,31 +1980,31 @@ class SimpleLoginBot {
   async simulateResultsReading(page) {
     try {
       console.log("📖 Имитируем чтение результатов поиска...");
-      
+
       // Случайные движения мыши по результатам
       const readingMovements = Math.floor(Math.random() * 4) + 3; // 3-6 движений
-      
+
       for (let i = 0; i < readingMovements; i++) {
         // Случайные координаты в области результатов
         const x = Math.random() * 600 + 200; // 200-800px
         const y = Math.random() * 300 + 400; // 400-700px (область результатов)
-        
+
         await page.mouse.move(x, y, {
           steps: Math.floor(Math.random() * 6) + 3 // 3-8 шагов
         });
-        
+
         // Пауза "чтения"
         await this.randomDelay(800, 1800);
-        
+
         // Иногда делаем скролл
         if (Math.random() < 0.3) {
           await page.mouse.wheel(0, Math.random() * 150 + 50);
           await this.randomDelay(500, 1000);
         }
       }
-      
+
       console.log("✅ Имитация чтения результатов завершена");
-      
+
     } catch (error) {
       console.warn("⚠️ Ошибка имитации чтения результатов:", error.message);
     }
@@ -2015,29 +2016,29 @@ class SimpleLoginBot {
   async retrySearchWithSameTerm(page, searchTerm) {
     try {
       console.log(`🔄 Повторный поиск с термином: "${searchTerm}"`);
-      
+
       // Случайная пауза перед повторным поиском
       await this.randomDelay(2000, 4000);
-      
+
       // Имитируем человекоподобное поведение - движение к полю поиска
       await this.moveMouseToElement(page, '#test-centres-input');
       await this.randomDelay(300, 700);
-      
+
       // Очищаем поле и вводим заново
       await this.humanSearchInput(page, '#test-centres-input', searchTerm);
-      
+
       // Пауза перед кликом
       await this.randomDelay(800, 1500);
-      
+
       // Кликаем по кнопке поиска
       await this.humanClick(page, '#test-centres-submit');
       console.log("✅ Повторный поиск инициирован");
-      
+
       // Ждем результатов
       await this.waitForSearchResults(page);
-      
+
       return true;
-      
+
     } catch (error) {
       console.error("❌ Ошибка повторного поиска:", error.message);
       return false;
@@ -2056,9 +2057,9 @@ class SimpleLoginBot {
 
       // Ждем jQuery и готовности DOM
       await page.waitForFunction(() => {
-        return typeof window.jQuery !== 'undefined' && 
+        return typeof window.jQuery !== 'undefined' &&
                document.readyState === 'complete' &&
-               window.jQuery && 
+               window.jQuery &&
                window.jQuery.isReady;
       }, { timeout: 10000 });
 
@@ -2089,7 +2090,7 @@ class SimpleLoginBot {
       // Проверяем появление результатов поиска (могут быть разные селекторы)
       const possibleResultSelectors = [
         '.test-centre-results',
-        '.search-results', 
+        '.search-results',
         '.test-centres-list',
         '[class*="result"]',
         '[class*="centre"]'

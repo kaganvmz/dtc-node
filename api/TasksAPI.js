@@ -40,12 +40,12 @@ export class TasksAPIRateLimitException extends TasksAPIException {
  */
 export class TasksAPI {
   // Private API configuration
-  #apiDomain = "https://driving-test-cancellations.com/";
+  #apiDomain = process.env.API_DOMAIN;
   #endpoints = {
-    getTask: "wp-json/slot-tasks/v1/get-task",
-    ping: "wp-json/slot-tasks/v1/ping",
-    cancel: "wp-json/slot-tasks/v1/cancel_task",
-    success: "wp-json/slot-tasks/v1/success"
+    getTask: "get-task",
+    // ping: "ping",
+    cancel: "cancel-task",
+    success: "success-task"
   };
   #headers = {};
   #requestTimeout = 30000; // 30 seconds
@@ -76,12 +76,14 @@ export class TasksAPI {
   /**
    * Makes HTTP request with error handling and retries
    * @param {string} method - HTTP method (GET, POST, etc.)
-   * @param {string} endpoint - API endpoint 
+   * @param {string} endpoint - API endpoint
    * @param {object} options - Request options (params, data, etc.)
    * @returns {Promise<object>} API response
    */
   async #makeRequest(method, endpoint, options = {}) {
-    const url = `${this.#apiDomain}${endpoint}`;
+    // skip SSL verification for localhost
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    const url = `${this.#apiDomain}${endpoint}/`;
     const { params, data } = options;
 
     // Build URL with query parameters
@@ -203,17 +205,19 @@ export class TasksAPI {
    * @returns {Promise<object>} API response
    */
   async cancelTask(taskId, options = {}) {
-    const { isLimit = false, isAuthError = false } = options;
+    const { isLimit = false, isAuthError = false, error = '' } = options;
 
     console.log(`🚫 Cancelling task ${taskId}... (limit: ${isLimit}, auth_error: ${isAuthError})`);
 
-    const params = { id: taskId };
-
-    params.is_limit = isLimit;
-    params.is_auth_error = isAuthError;
+    const data = {
+      id: taskId,
+      is_limit: isLimit,
+      is_auth_error: isAuthError,
+      error: error,
+    };
 
     try {
-      const response = await this.#makeRequest('GET', this.#endpoints.cancel, { params });
+      const response = await this.#makeRequest('POST', `${this.#endpoints.cancel}/${taskId}`, { data });
       console.log(`✅ Task ${taskId} cancelled successfully`);
       return response;
 
@@ -240,7 +244,7 @@ export class TasksAPI {
     };
 
     try {
-      const response = await this.#makeRequest('POST', this.#endpoints.success, { data });
+      const response = await this.#makeRequest('POST', `${this.#endpoints.success}/${taskId}`, { data });
       console.log(`✅ Task ${taskId} marked as successful`);
       return response;
 
@@ -255,22 +259,22 @@ export class TasksAPI {
    * @param {number} taskId - Task ID to ping
    * @returns {Promise<object>} API response
    */
-  async ping(taskId) {
-    console.log(`💗 Pinging task ${taskId}...`);
+  // async ping(taskId) {
+  //   console.log(`💗 Pinging task ${taskId}...`);
 
-    const params = { id: taskId };
+  //   const params = { id: taskId };
 
-    try {
-      const response = await this.#makeRequest('GET', this.#endpoints.ping, { params });
-      console.log(`✅ Task ${taskId} pinged successfully`);
-      return response;
+  //   try {
+  //     const response = await this.#makeRequest('GET', this.#endpoints.ping, { params });
+  //     console.log(`✅ Task ${taskId} pinged successfully`);
+  //     return response;
 
-    } catch (error) {
-      console.warn(`⚠️ Failed to ping task ${taskId}: ${error.message}`);
-      // Don't throw for ping failures, just log warning
-      return null;
-    }
-  }
+  //   } catch (error) {
+  //     console.warn(`⚠️ Failed to ping task ${taskId}: ${error.message}`);
+  //     // Don't throw for ping failures, just log warning
+  //     return null;
+  //   }
+  // }
 
   /**
    * Validate task object structure
