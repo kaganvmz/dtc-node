@@ -11,6 +11,7 @@ class DtcLoginWorker extends SimpleLoginBot {
     this.dtcLoginAPI = null;
     this.pollIntervalMs = config.pollIntervalMs;
     this.bypassAttempts = config.bypassAttempts;
+    this.maxProxyRotationsPerTask = config.maxProxyRotationsPerTask;
   }
 
   static #loadConfigFromEnv() {
@@ -41,6 +42,11 @@ class DtcLoginWorker extends SimpleLoginBot {
       throw new Error("DTC_BYPASS_ATTEMPTS must be a positive number");
     }
 
+    const maxProxyRotationsPerTask = Number(process.env.DTC_MAX_PROXY_ROTATIONS_PER_TASK || 2);
+    if (Number.isNaN(maxProxyRotationsPerTask) || maxProxyRotationsPerTask < 0) {
+      throw new Error("DTC_MAX_PROXY_ROTATIONS_PER_TASK must be a non-negative number");
+    }
+
     return {
       multiloginCredentials: {
         email: multiloginEmail,
@@ -49,7 +55,8 @@ class DtcLoginWorker extends SimpleLoginBot {
       captchaApiKey,
       workerName,
       pollIntervalMs,
-      bypassAttempts
+      bypassAttempts,
+      maxProxyRotationsPerTask
     };
   }
 
@@ -57,6 +64,11 @@ class DtcLoginWorker extends SimpleLoginBot {
     let lastError = null;
 
     for (let attempt = 1; attempt <= this.bypassAttempts; attempt++) {
+      if (await this.isLoginPageReady(page)) {
+        console.log(`ℹ️ ${stageLabel}: login page is already ready, skipping bypass`);
+        return;
+      }
+
       try {
         console.log(`🛡️ ${stageLabel}: попытка bypass ${attempt}/${this.bypassAttempts}...`);
         await this.bypassIncapsula(page);
@@ -77,6 +89,11 @@ class DtcLoginWorker extends SimpleLoginBot {
         console.log(`🔄 ${stageLabel}: пробуем обновить страницу и повторить bypass...`);
         await page.goto(page.url(), { waitUntil: "domcontentloaded", timeout: 30000 });
         await this.sleep(3000);
+
+        if (await this.isLoginPageReady(page)) {
+          console.log(`ℹ️ ${stageLabel}: login page appeared after refresh, stopping bypass retries`);
+          return;
+        }
       }
     }
 
@@ -220,14 +237,18 @@ class DtcLoginWorker extends SimpleLoginBot {
     };
   }
 
-  async verifyDtcLogin(page, loginData) {
+  async verifyDtcLogin(page, loginData, attemptNumber = 1) {
     try {
-      console.log("🔑 Проверка DTC логина...");
+      console.log(`🔑 Проверка DTC логина (attempt ${attemptNumber})...`);
+      const loginTypingOptions = {
+        typoChance: 0.005,
+        pauseChance: 0.04
+      };
 
       await this.randomDelay(200, 500);
-      await this.humanTyping(page, "#driving-licence-number", loginData.username);
+      await this.humanTyping(page, "#driving-licence-number", loginData.username, loginTypingOptions);
       await this.randomDelay(300, 800);
-      await this.humanTyping(page, "#application-reference-number", loginData.password);
+      await this.humanTyping(page, "#application-reference-number", loginData.password, loginTypingOptions);
 
       await this.validateFieldContent(page, "#driving-licence-number", loginData.username);
       await this.validateFieldContent(page, "#application-reference-number", loginData.password);
@@ -259,7 +280,28 @@ class DtcLoginWorker extends SimpleLoginBot {
         try {
           await this.attemptBypassWithRetries(page, "Post-interstitial");
           await this.sleep(3000);
+
+          if (await this.isLoginPageReady(page) && !page.url().includes("/manage")) {
+            if (attemptNumber < 2) {
+              console.log("🔄 Post-interstitial flow returned to login page, retrying login once...");
+              return await this.verifyDtcLogin(page, loginData, attemptNumber + 1);
+            }
+
+            return {
+              success: false,
+              error: "returned_to_login",
+              message: "Post-interstitial flow returned to login page"
+            };
+          }
         } catch (error) {
+          if (error instanceof ProxyBlockedError) {
+            return {
+              success: false,
+              error: "proxy_blocked",
+              message: error.message
+            };
+          }
+
           return {
             success: false,
             error: "captcha_failed",
@@ -270,12 +312,45 @@ class DtcLoginWorker extends SimpleLoginBot {
 
       const currentUrl = page.url();
       console.log(`📍 URL после DTC логина: ${currentUrl}`);
+      await this.visualPause("after login submit");
 
       if (!currentUrl.includes("/manage")) {
+        const returnedToLoginWithQueueToken =
+          currentUrl.includes("/login") &&
+          (currentUrl.includes("qitq=") || currentUrl.includes("qitrt=Safetynet"));
+
+        if (returnedToLoginWithQueueToken && await this.isLoginPageReady(page)) {
+          if (attemptNumber < 2) {
+            console.log("🔄 Login returned to /login with Queue-it Safetynet token, retrying login once...");
+            return await this.verifyDtcLogin(page, loginData, attemptNumber + 1);
+          }
+
+          return {
+            success: false,
+            error: "returned_to_login",
+            message: "Authentication flow returned to login page with Queue-it Safetynet token"
+          };
+        }
+
         return {
           success: false,
           error: "unknown_login_issue",
-          message: "Login did not reach /manage"
+          message: `Login did not reach /manage (url: ${currentUrl})`
+        };
+      }
+
+      await this.waitForImpervaInterstitial(page, 20000);
+
+      if (await this.isLoginPageReady(page)) {
+        if (attemptNumber < 2) {
+          console.log("🔄 Authentication flow returned to login page, retrying login once...");
+          return await this.verifyDtcLogin(page, loginData, attemptNumber + 1);
+        }
+
+        return {
+          success: false,
+          error: "returned_to_login",
+          message: "Authentication flow returned to login page"
         };
       }
 
@@ -284,7 +359,28 @@ class DtcLoginWorker extends SimpleLoginBot {
         try {
           await this.attemptBypassWithRetries(page, "Post-login");
           await this.sleep(3000);
+
+          if (await this.isLoginPageReady(page) && !page.url().includes("/manage")) {
+            if (attemptNumber < 2) {
+              console.log("🔄 Post-login flow returned to login page, retrying login once...");
+              return await this.verifyDtcLogin(page, loginData, attemptNumber + 1);
+            }
+
+            return {
+              success: false,
+              error: "returned_to_login",
+              message: "Post-login flow returned to login page"
+            };
+          }
         } catch (error) {
+          if (error instanceof ProxyBlockedError) {
+            return {
+              success: false,
+              error: "proxy_blocked",
+              message: error.message
+            };
+          }
+
           return {
             success: false,
             error: "captcha_failed",
@@ -293,12 +389,70 @@ class DtcLoginWorker extends SimpleLoginBot {
         }
       }
 
-      const isViewBookingPage = await this.checkViewBookingPage(page);
+      const finalPageState = await this.waitForManagePageResult(page);
+      if (finalPageState.state === "login_error") {
+        return {
+          success: false,
+          error: finalPageState.errorType || "invalid_credentials",
+          message: finalPageState.message
+        };
+      }
+
+      if (finalPageState.state === "login_page") {
+        if (attemptNumber < 2 && await this.isLoginPageReady(page)) {
+          console.log("🔄 Post-login flow returned to login page, retrying login once...");
+          return await this.verifyDtcLogin(page, loginData, attemptNumber + 1);
+        }
+
+        return {
+          success: false,
+          error: "returned_to_login",
+          message: finalPageState.message
+        };
+      }
+
+      if (finalPageState.state === "captcha") {
+        await this.waitForImpervaInterstitial(page, 20000);
+        const hasCaptchaAfterInterstitial = await this.checkForIncapsula(page);
+        if (!hasCaptchaAfterInterstitial) {
+          const recoveredState = await this.waitForManagePageResult(page, 15000);
+          if (recoveredState.state === "view_booking") {
+            return {
+              success: true,
+              message: "DTC login verified successfully"
+            };
+          }
+        }
+
+        try {
+          await this.attemptBypassWithRetries(page, "Post-manage");
+          await this.sleep(3000);
+        } catch (error) {
+          if (error instanceof ProxyBlockedError) {
+            return {
+              success: false,
+              error: "proxy_blocked",
+              message: error.message
+            };
+          }
+
+          return {
+            success: false,
+            error: "captcha_failed",
+            message: error.message
+          };
+        }
+      }
+
+      const isViewBookingPage = finalPageState.state === "view_booking"
+        ? true
+        : await this.checkViewBookingPage(page);
+
       if (!isViewBookingPage) {
         return {
           success: false,
           error: "page_validation_failed",
-          message: "Login succeeded but View booking page was not confirmed"
+          message: finalPageState.message || "Login succeeded but View booking page was not confirmed"
         };
       }
 
@@ -315,7 +469,9 @@ class DtcLoginWorker extends SimpleLoginBot {
   async processDtcLogin(task) {
     let browser = null;
     let profileId = null;
+    let proxyRotationCount = 0;
     const loginData = this.buildLoginData(task);
+    let loginResult = null;
 
     try {
       console.log(`🔄 Обработка DTC login ${task.id}...`);
@@ -331,41 +487,156 @@ class DtcLoginWorker extends SimpleLoginBot {
           await this.attemptBypassWithRetries(page, "Initial page");
         }
       } catch (error) {
-        if (!(error instanceof ProxyBlockedError)) {
-          throw error;
+        console.warn(`⚠️ Initial page bypass failed: ${error.message}`);
+        if (proxyRotationCount >= this.maxProxyRotationsPerTask) {
+          loginResult = {
+            success: false,
+            error: "proxy_blocked_after_rotations",
+            message: `Proxy blocked after ${proxyRotationCount} rotation(s)`
+          };
+        } else {
+          console.log("🔄 Restarting profile with rotated proxy after initial bypass failure...");
+          proxyRotationCount++;
+
+          const restarted = await this.restartProfileWithRotatedProxy(profileId, browser);
+          browser = restarted.browser;
+          page = restarted.page;
+
+          const hasCaptchaAfterRestart = await this.checkForIncapsula(page);
+          if (hasCaptchaAfterRestart) {
+            console.log("🛡️ Повторный bypass после ротации прокси...");
+            try {
+              await this.attemptBypassWithRetries(page, "Initial page after proxy rotation");
+            } catch (error) {
+              if (error instanceof ProxyBlockedError) {
+                if (proxyRotationCount >= this.maxProxyRotationsPerTask) {
+                  loginResult = {
+                    success: false,
+                    error: "proxy_blocked_after_rotations",
+                    message: `Proxy blocked after ${proxyRotationCount} rotation(s)`
+                  };
+                  console.log("⚠️ Proxy rotation limit reached during initial recovery");
+                } else {
+                  loginResult = {
+                    success: false,
+                    error: "proxy_blocked",
+                    message: error.message
+                  };
+                }
+              } else if (error.message.includes('CapMonster returned error: "Unknown"')) {
+                console.log("🔄 Refreshing challenge page for forced legacy retry after proxy rotation...");
+                await page.goto("https://driverpracticaltest.dvsa.gov.uk/login", {
+                  waitUntil: "domcontentloaded",
+                  timeout: 30000
+                });
+                await this.sleep(3000);
+
+                try {
+                  await this.bypassIncapsula(page, { forceLegacy: true });
+                } catch (legacyError) {
+                  if (legacyError instanceof ProxyBlockedError) {
+                    if (proxyRotationCount >= this.maxProxyRotationsPerTask) {
+                      loginResult = {
+                        success: false,
+                        error: "proxy_blocked_after_rotations",
+                        message: `Proxy blocked after ${proxyRotationCount} rotation(s)`
+                      };
+                      console.log("⚠️ Proxy rotation limit reached during forced legacy recovery");
+                    } else {
+                      loginResult = {
+                        success: false,
+                        error: "proxy_blocked",
+                        message: legacyError.message
+                      };
+                    }
+                  } else {
+                    throw legacyError;
+                  }
+                }
+              } else {
+                throw error;
+              }
+            }
+          }
+        }
+      }
+
+      if (loginResult?.error === "proxy_blocked_after_rotations" || loginResult?.error === "proxy_blocked") {
+        await this.dtcLoginAPI.failDtcLogin(task.id, {
+          licence_number: loginData.username,
+          theory_test_ref: loginData.password,
+          error: loginResult.error === "proxy_blocked_after_rotations"
+            ? `proxy_blocked_after_rotations: ${loginResult.message || "Proxy rotation limit reached"}`
+            : `proxy_blocked: ${loginResult.message || "DVSA/Incapsula blocked the current proxy"}`
+        });
+        console.log(`❌ DTC login ${task.id} marked as failed`);
+        return;
+      }
+
+      for (let verificationAttempt = 1; verificationAttempt <= 2; verificationAttempt++) {
+        const hasLoginForm = await this.checkLoginForm(page);
+        if (!hasLoginForm) {
+          throw new Error("Login form not found");
         }
 
+        loginResult = await this.verifyDtcLogin(page, loginData);
+
+        if (loginResult.success) {
+          await this.dtcLoginAPI.approveDtcLogin(task.id, {
+            licence_number: loginData.username,
+            theory_test_ref: loginData.password
+          });
+          console.log(`✅ DTC login ${task.id} approved`);
+          return;
+        }
+
+        if (loginResult.error !== "proxy_blocked" || verificationAttempt >= 2) {
+          break;
+        }
+
+        if (proxyRotationCount >= this.maxProxyRotationsPerTask) {
+          loginResult = {
+            success: false,
+            error: "proxy_blocked_after_rotations",
+            message: `Proxy blocked after ${proxyRotationCount} rotation(s)`
+          };
+          break;
+        }
+
+        console.log("🔄 Verification hit proxy block, rotating proxy and retrying login...");
+        proxyRotationCount++;
         const restarted = await this.restartProfileWithRotatedProxy(profileId, browser);
         browser = restarted.browser;
         page = restarted.page;
 
         const hasCaptchaAfterRestart = await this.checkForIncapsula(page);
         if (hasCaptchaAfterRestart) {
-          console.log("🛡️ Повторный bypass после ротации прокси...");
-          await this.attemptBypassWithRetries(page, "Initial page after proxy rotation");
+          console.log("🛡️ Bypass after verification-time proxy rotation...");
+          try {
+            await this.attemptBypassWithRetries(page, "Verification recovery");
+          } catch (error) {
+            if (error instanceof ProxyBlockedError) {
+              loginResult = {
+                success: false,
+                error: "proxy_blocked",
+                message: error.message
+              };
+              break;
+            }
+
+            throw error;
+          }
         }
-      }
-
-      const hasLoginForm = await this.checkLoginForm(page);
-      if (!hasLoginForm) {
-        throw new Error("Login form not found");
-      }
-
-      const loginResult = await this.verifyDtcLogin(page, loginData);
-
-      if (loginResult.success) {
-        await this.dtcLoginAPI.approveDtcLogin(task.id, {
-          licence_number: loginData.username,
-          theory_test_ref: loginData.password
-        });
-        console.log(`✅ DTC login ${task.id} approved`);
-        return;
       }
 
       await this.dtcLoginAPI.failDtcLogin(task.id, {
         licence_number: loginData.username,
         theory_test_ref: loginData.password,
-        error: loginResult.message || loginResult.error || "DTC login verification failed"
+        error: loginResult?.error === "proxy_blocked_after_rotations"
+          ? `proxy_blocked_after_rotations: ${loginResult?.message || "Proxy rotation limit reached"}`
+          : loginResult?.error === "proxy_blocked"
+          ? `proxy_blocked: ${loginResult?.message || "DVSA/Incapsula blocked the current proxy"}`
+          : (loginResult?.message || loginResult?.error || "DTC login verification failed")
       });
       console.log(`❌ DTC login ${task.id} marked as failed`);
     } catch (error) {

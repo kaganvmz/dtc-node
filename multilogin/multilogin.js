@@ -36,9 +36,66 @@ export class MultiloginAPI {
     this.password = password;
     this.defaultFolder = "ab94f23e-bbdc-41c6-b3a5-146189889db5";
     this.defaultCoreVersion = Number(process.env.MULTILOGIN_CORE_VERSION || 146);
+    const browserStrategy = process.env.MULTILOGIN_PROFILE_STRATEGY || process.env.MULTILOGIN_BROWSER_TYPE || "mimic";
+    this.defaultBrowserType = browserStrategy;
+    this.defaultOsType = process.env.MULTILOGIN_OS_TYPE || "windows";
+    this.defaultLocale = process.env.MULTILOGIN_LOCALE || null;
+    this.defaultLanguages = process.env.MULTILOGIN_LANGUAGES
+      ? process.env.MULTILOGIN_LANGUAGES.split(",").map((value) => value.trim()).filter(Boolean)
+      : [];
     this.proxyManager = new ProxyManager(1);
     this.currentProxyConfig = null;
     this.browserProfileName = process.env.BROWSER_PROFILE_NAME || null;
+  }
+
+  buildProfileFlags() {
+    return {
+      audio_masking: "mask",
+      fonts_masking: "mask",
+      geolocation_masking: "mask",
+      geolocation_popup: "block",
+      graphics_masking: "mask",
+      graphics_noise: "mask",
+      localization_masking: "mask",
+      media_devices_masking: "mask",
+      navigator_masking: "mask",
+      ports_masking: "mask",
+      proxy_masking: "custom",
+      screen_masking: "mask",
+      timezone_masking: "mask",
+      webrtc_masking: "mask",
+      canvas_noise: "mask",
+    };
+  }
+
+  buildProfileParameters() {
+    const parameters = {
+      flags: this.buildProfileFlags(),
+      storage: { is_local: false, save_service_worker: true },
+      fingerprint: {},
+    };
+
+    if (this.defaultLocale) {
+      parameters.fingerprint.locale = this.defaultLocale;
+    }
+
+    if (this.defaultLanguages.length > 0) {
+      parameters.fingerprint.languages = this.defaultLanguages;
+    }
+
+    return parameters;
+  }
+
+  buildProfilePayload(profileName, proxy, browserType = null) {
+    return {
+      name: profileName,
+      browser_type: browserType || this.defaultBrowserType,
+      folder_id: this.defaultFolder,
+      core_version: this.defaultCoreVersion,
+      os_type: this.defaultOsType,
+      proxy,
+      parameters: this.buildProfileParameters(),
+    };
   }
 
   /**
@@ -149,35 +206,7 @@ export class MultiloginAPI {
    * @returns {Promise<object>} The creation result.
    */
   async createProfile(profileName, proxy, browserType) {
-    const data = {
-      name: profileName,
-      browser_type: browserType,
-      folder_id: this.defaultFolder,
-      core_version: this.defaultCoreVersion,
-      os_type: "windows",
-      proxy: proxy,
-      parameters: {
-        flags: {
-          audio_masking: "mask",
-          fonts_masking: "mask",
-          geolocation_masking: "mask",
-          geolocation_popup: "block",
-          graphics_masking: "mask",
-          graphics_noise: "mask",
-          localization_masking: "mask",
-          media_devices_masking: "mask",
-          navigator_masking: "mask",
-          ports_masking: "mask",
-          proxy_masking: "custom",
-          screen_masking: "mask",
-          timezone_masking: "mask",
-          webrtc_masking: "mask",
-          canvas_noise: "mask",
-        },
-        storage: { is_local: false, save_service_worker: true },
-        fingerprint: {},
-      },
-    };
+    const data = this.buildProfilePayload(profileName, proxy, browserType);
     const res = await fetch(`${this.#apiServer}${this.#createEndpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json", ...this.#httpHeaders },

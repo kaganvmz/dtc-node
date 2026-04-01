@@ -26,6 +26,16 @@ class SimpleLoginBot {
     this.captchaSolver = null;
     this.tasksAPI = null;
     this.isRunning = false;
+    this.visualPauseMs = Number(process.env.DTC_VISUAL_PAUSE_MS || 0);
+  }
+
+  async visualPause(label) {
+    if (!this.visualPauseMs || Number.isNaN(this.visualPauseMs) || this.visualPauseMs <= 0) {
+      return;
+    }
+
+    console.log(`👀 Visual pause (${label}): ${this.visualPauseMs}ms`);
+    await this.sleep(this.visualPauseMs);
   }
 
   async createProfile(profileName) {
@@ -42,12 +52,12 @@ class SimpleLoginBot {
         console.log("📝 Создание нового профиля...");
         const currentProxy = this.multiloginAPI.getCurrentProxy();
         const formattedProxy = this.multiloginAPI.proxyManager.formatForMultilogin(currentProxy);
-        console.log("📤 Прокси для профиля:", JSON.stringify(formattedProxy, null, 2));
+        console.log(`📤 Proxy for profile: ${formattedProxy.type}://${formattedProxy.host}:${formattedProxy.port}`);
 
         const createResult = await this.multiloginAPI.createProfile(
           profileName,
           formattedProxy,
-          "mimic"
+          this.multiloginAPI.defaultBrowserType
         );
 
         if (createResult?.status?.http_code === 201 && Array.isArray(createResult?.data?.ids) && createResult.data.ids.length > 0) {
@@ -55,7 +65,7 @@ class SimpleLoginBot {
           console.log(`✅ Профиль создан с ID: ${profileId}`);
 
           const updateResult = await this.multiloginAPI.updateProfileProxy(profileId, formattedProxy);
-          console.log(`📤 Результат назначения прокси: ${JSON.stringify(updateResult?.status)}`);
+          console.log(`📤 Proxy assignment result: http=${updateResult?.status?.http_code} msg=${updateResult?.status?.message || "-"}`);
 
           return profileId;
         }
@@ -170,10 +180,147 @@ class SimpleLoginBot {
       });
 
       await this.sleep(2000);
+      await this.visualPause("login page");
 
       return page;
     } catch (error) {
       throw new Error(`Ошибка навигации: ${error.message}`);
+    }
+  }
+
+  async isQueueItPage(page) {
+    try {
+      const currentUrl = page.url();
+      if (currentUrl.includes("queue.driverpracticaltest.dvsa.gov.uk")) {
+        return true;
+      }
+
+      const pageTitle = await page.title().catch(() => "");
+      if (pageTitle.includes("Queue-it")) {
+        return true;
+      }
+
+      return await page.evaluate(() => {
+        const body = document.body;
+        if (!body) {
+          return false;
+        }
+
+        return body.dataset.pageid === "queue" || body.classList.contains("queue");
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  async waitForQueueRedirect(page, timeoutMs = 180000) {
+    if (!(await this.isQueueItPage(page))) {
+      return;
+    }
+
+    console.log("⏳ Queue-it detected, waiting for redirect...");
+    const startedAt = Date.now();
+    let lastUsersAhead = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      if (!(await this.isQueueItPage(page))) {
+        console.log(`✅ Queue-it redirect completed: ${page.url()}`);
+        await this.sleep(3000);
+        return;
+      }
+
+      const queueState = await page.evaluate(() => {
+        const usersAhead =
+          document.querySelector("[data-bind*='usersInLineAheadOfYou']")?.textContent?.trim() ||
+          document.querySelector("#MainPart_lbUsersInLineAheadOfYou")?.textContent?.trim() ||
+          null;
+        const body = document.body;
+
+        return {
+          pageId: body?.dataset?.pageid || null,
+          pageClass: body?.className || null,
+          usersAhead
+        };
+      }).catch(() => ({ pageId: null, pageClass: null, usersAhead: null }));
+
+      if (queueState.usersAhead && queueState.usersAhead !== lastUsersAhead) {
+        lastUsersAhead = queueState.usersAhead;
+        console.log(`⏳ Queue-it status: users ahead ${queueState.usersAhead}`);
+      }
+
+      await this.sleep(2000);
+    }
+
+    throw new Error("Queue-it redirect timeout");
+  }
+
+  async isImpervaInterstitialPage(page) {
+    try {
+      const currentUrl = page.url();
+      const pageTitle = await page.title().catch(() => "");
+
+      return await page.evaluate(({ currentUrl, pageTitle }) => {
+        const bodyText = document.body?.innerText || "";
+        const hasInterstitial = Boolean(document.querySelector("#interstitial-inprogress"));
+        const hasPardonHeader = bodyText.includes("Pardon Our Interruption");
+        const hasStandBy = bodyText.includes("Please stand by");
+        const hasProtectionScript = Array.from(document.querySelectorAll("script[src]")).some((script) => {
+          const src = script.getAttribute("src") || "";
+          return src.includes("AAWS4Fk4") || src.includes("any-with-Green-euery-Swortune");
+        });
+
+        return (
+          pageTitle.includes("Pardon Our Interruption") ||
+          currentUrl.includes("/manage") && (hasInterstitial || hasPardonHeader || hasStandBy || hasProtectionScript)
+        );
+      }, { currentUrl, pageTitle });
+    } catch {
+      return false;
+    }
+  }
+
+  async waitForImpervaInterstitial(page, timeoutMs = 30000) {
+    if (!(await this.isImpervaInterstitialPage(page))) {
+      return false;
+    }
+
+    console.log("⏳ Imperva interstitial detected, waiting for auto-redirect...");
+    await this.visualPause("imperva interstitial");
+    const startedAt = Date.now();
+    let lastUrl = page.url();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      if (!(await this.isImpervaInterstitialPage(page))) {
+        console.log(`✅ Imperva interstitial finished: ${page.url()}`);
+        await this.sleep(3000);
+        return true;
+      }
+
+      const currentUrl = page.url();
+      if (currentUrl !== lastUrl) {
+        lastUrl = currentUrl;
+        console.log(`📍 Interstitial URL: ${currentUrl}`);
+      }
+
+      await this.sleep(2000);
+    }
+
+    console.log("⚠️ Imperva interstitial did not finish in time");
+    return false;
+  }
+
+  async isLoginPageReady(page) {
+    try {
+      return await page.evaluate(() => {
+        const bodyId = document.body?.id || "";
+        const hasLicence = Boolean(document.querySelector("#driving-licence-number"));
+        const hasReference = Boolean(document.querySelector("#application-reference-number"));
+        const hasButton = Boolean(document.querySelector("#booking-login"));
+
+        return bodyId === "page-login" || (hasLicence && hasReference && hasButton);
+      });
+    } catch {
+      return false;
     }
   }
 
@@ -188,9 +335,78 @@ class SimpleLoginBot {
     }
   }
 
-  async bypassIncapsula(page) {
+  async detectIncapsulaPageType(page) {
+    const inspectHtml = (html) => {
+      if (!html || typeof html !== "string") {
+        return null;
+      }
+
+      const hasSolvableChallengeMarker =
+        html.includes("_Incapsula_Resource?SWJIYLWA=") ||
+        html.includes("SWJIYLWA=");
+
+      const blockedMarkers = [
+        "CWUDNSAI=",
+        "edet=15",
+        "edet=16",
+        "incident_id=",
+        "[Error Title]",
+        "Request unsuccessful. Incapsula incident ID",
+        "Error 15",
+        "Error 16"
+      ];
+
+      const hasBlockedMarker = blockedMarkers.some((marker) => html.includes(marker));
+
+      if (hasSolvableChallengeMarker) {
+        return "captcha";
+      }
+
+      if (hasBlockedMarker) {
+        return "blocked";
+      }
+
+      return null;
+    };
+
     try {
+      const mainHtml = await page.content().catch(() => "");
+      const mainType = inspectHtml(mainHtml);
+      if (mainType) {
+        return mainType;
+      }
+
+      const iframeEl = await page.$("#main-iframe");
+      if (!iframeEl) {
+        return null;
+      }
+
+      const iframeFrame = await iframeEl.contentFrame();
+      if (!iframeFrame) {
+        return null;
+      }
+
+      const iframeHtml = await iframeFrame.evaluate(() => document.documentElement.outerHTML).catch(() => "");
+      return inspectHtml(iframeHtml);
+    } catch {
+      return null;
+    }
+  }
+
+  async bypassIncapsula(page, options = {}) {
+    try {
+      const pageTypeBeforeSolve = await this.detectIncapsulaPageType(page);
+      if (pageTypeBeforeSolve === "blocked") {
+        throw new ProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.");
+      }
+
       console.log("🛡️ Запуск обхода Incapsula через CapMonster...");
+      await this.visualPause("before bypass");
+
+      const pageTypeAfterPause = await this.detectIncapsulaPageType(page);
+      if (pageTypeAfterPause === "blocked") {
+        throw new ProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.");
+      }
 
       try {
         const ipPage = await page.context().newPage();
@@ -203,8 +419,42 @@ class SimpleLoginBot {
       }
 
       let incapsulaScriptUrl = null;
+      let challengeScriptUrl = null;
+      let incapsulaScriptBase64 = null;
       const swjiylwaSearchStart = Date.now();
       let iframeErrorPageLogged = false;
+
+      const extractChallengeScriptUrl = async (frame) => {
+        try {
+          return await frame.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll("script[src]"));
+            const candidate = scripts.find((script) => {
+              const src = script.getAttribute("src") || "";
+              if (!src) {
+                return false;
+              }
+
+              if (src.includes("_Incapsula_Resource")) {
+                return false;
+              }
+
+              if (src.includes("/resources/")) {
+                return false;
+              }
+
+              if (src.includes("jquery") || src.includes("respond.js") || src.includes("govuk-template")) {
+                return false;
+              }
+
+              return true;
+            });
+
+            return candidate ? candidate.getAttribute("src") : null;
+          });
+        } catch {
+          return null;
+        }
+      };
 
       const extractSwjiylwa = async (frame) => {
         try {
@@ -239,18 +489,20 @@ class SimpleLoginBot {
         }
       };
 
-      while (!incapsulaScriptUrl && Date.now() - swjiylwaSearchStart < 15000) {
+      while ((!incapsulaScriptUrl || !challengeScriptUrl) && Date.now() - swjiylwaSearchStart < 15000) {
         incapsulaScriptUrl = await extractSwjiylwa(page.mainFrame());
+        challengeScriptUrl = await extractChallengeScriptUrl(page.mainFrame());
 
-        if (!incapsulaScriptUrl) {
+        if (!incapsulaScriptUrl || !challengeScriptUrl) {
           try {
             const iframeEl = await page.$("#main-iframe");
             if (iframeEl) {
               const iframeFrame = await iframeEl.contentFrame();
               if (iframeFrame) {
                 await iframeFrame.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
-                incapsulaScriptUrl = await extractSwjiylwa(iframeFrame);
-                if (!incapsulaScriptUrl) {
+                incapsulaScriptUrl = incapsulaScriptUrl || await extractSwjiylwa(iframeFrame);
+                challengeScriptUrl = challengeScriptUrl || await extractChallengeScriptUrl(iframeFrame);
+                if (!incapsulaScriptUrl && !challengeScriptUrl) {
                   const iframeHtml = await iframeFrame.evaluate(() => document.documentElement.outerHTML).catch(() => "");
                   if (iframeHtml && !iframeErrorPageLogged) {
                     iframeErrorPageLogged = true;
@@ -269,23 +521,56 @@ class SimpleLoginBot {
         }
       }
 
+      const currentHtml = await page.content().catch(() => "");
+      this.#throwIfProxyBlockedHtml(currentHtml);
+
       console.log(`📤 incapsulaScriptUrl: ${incapsulaScriptUrl || "НЕ НАЙДЕН"}`);
-      if (!incapsulaScriptUrl) {
+      console.log(`📤 challengeScriptUrl: ${challengeScriptUrl || "НЕ НАЙДЕН"}`);
+      if (!challengeScriptUrl && !incapsulaScriptUrl) {
         const html = await page.content();
-        console.log(`📄 HTML страницы (первые 2000 символов):\n${html.substring(0, 2000)}`);
+        const summary = {
+          edet: html.match(/edet=(\d+)/)?.[1] || null,
+          incidentId: html.match(/incident_id=([^&"\s<]+)/)?.[1] || null,
+          cip: html.match(/cip=([^&"\s<]+)/)?.[1] || null
+        };
+        console.log(`📄 Incapsula page summary: ${JSON.stringify(summary)}`);
         this.#throwIfProxyBlockedHtml(html);
-        throw new Error("Не удалось найти incapsulaScriptUrl (_Incapsula_Resource?SWJIYLWA=...) на странице");
+        throw new Error("Не удалось найти challenge script для Incapsula на странице");
+      }
+
+      const scriptUrlToFetch = challengeScriptUrl || incapsulaScriptUrl;
+      try {
+        const scriptResponse = await page.goto(new URL(scriptUrlToFetch, page.url()).toString(), {
+          waitUntil: "domcontentloaded",
+          timeout: 15000
+        });
+        const scriptText = await scriptResponse.text();
+        incapsulaScriptBase64 = Buffer.from(scriptText, "utf8").toString("base64");
+      } catch (error) {
+        throw new Error(`Не удалось получить Incapsula script content: ${error.message}`);
+      } finally {
+        await page.goto("https://driverpracticaltest.dvsa.gov.uk/login", {
+          waitUntil: "domcontentloaded",
+          timeout: CONFIG.TIMEOUTS.PAGE_LOAD
+        });
+        await this.sleep(2000);
+      }
+
+      if (!incapsulaScriptBase64) {
+        throw new Error("Incapsula script content is empty");
       }
 
       const allCookies = await page.context().cookies();
+      const sessionCookie = allCookies.find((cookie) => cookie.name.startsWith("incap_ses_"));
       const incapsulaCookies = allCookies
         .filter((cookie) => cookie.name.startsWith("incap_ses_") || cookie.name.startsWith("visid_incap_"))
         .map((cookie) => `${cookie.name}=${cookie.value}`)
         .join("; ");
+      const incapsulaSessionCookie = sessionCookie ? `${sessionCookie.name}=${sessionCookie.value}` : null;
 
-      console.log(`📤 incapsulaCookies: ${incapsulaCookies ? `${incapsulaCookies.substring(0, 80)}...` : "НЕ НАЙДЕНЫ"}`);
-      if (!incapsulaCookies) {
-        throw new Error("Не удалось найти cookies Incapsula (incap_ses_* / visid_incap_*)");
+      console.log(`📤 incapsulaSessionCookie: ${incapsulaSessionCookie ? `${incapsulaSessionCookie.substring(0, 80)}...` : "НЕ НАЙДЕН"}`);
+      if (!incapsulaSessionCookie) {
+        throw new Error("Не удалось найти session cookie Incapsula (incap_ses_*)");
       }
 
       const reese84UrlEndpoint = await page.evaluate(() => {
@@ -325,7 +610,9 @@ class SimpleLoginBot {
 
       const metadata = {
         incapsulaScriptUrl,
-        incapsulaCookies
+        incapsulaScriptBase64,
+        incapsulaCookies,
+        incapsulaSessionCookie
       };
       if (reese84UrlEndpoint) {
         metadata.reese84UrlEndpoint = reese84UrlEndpoint;
@@ -335,7 +622,8 @@ class SimpleLoginBot {
         page.url(),
         userAgent,
         metadata,
-        currentProxy
+        currentProxy,
+        options
       );
 
       console.log("✅ CapMonster solution received");
@@ -380,11 +668,13 @@ class SimpleLoginBot {
       const allCookiesAfter = await page.context().cookies();
       const incapCookiesAfter = allCookiesAfter.filter((cookie) => /incap|utmvc|reese84|nlbi/.test(cookie.name));
       console.log(`✅ Injected ${cookiesInjected} cookies; active: ${incapCookiesAfter.map((cookie) => cookie.name).join(", ")}`);
+      await this.visualPause("after cookies injected");
 
       const targetURL = page.url();
       console.log(`🔄 Навигация на ${targetURL}...`);
       await page.goto(targetURL, { waitUntil: "networkidle", timeout: CONFIG.TIMEOUTS.PAGE_LOAD });
       await this.sleep(8000);
+      await this.visualPause("after bypass navigation");
 
       const pageContent = await page.content();
       if (pageContent.includes("Access Denied") || pageContent.includes("Error 15") || pageContent.includes("Error 16")) {
@@ -399,7 +689,7 @@ class SimpleLoginBot {
         console.log(`📍 URL после reload: ${page.url()}`);
         const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 300));
         console.log(`📄 Контент страницы: ${bodyText}`);
-        console.log(`📄 Bypass metadata: script=${metadata.incapsulaScriptUrl} reese=${metadata.reese84UrlEndpoint || "none"}`);
+        console.log(`📄 Bypass metadata: scriptBase64=${metadata.incapsulaScriptBase64 ? "present" : "missing"} reese=${metadata.reese84UrlEndpoint || "none"}`);
         this.#throwIfProxyBlockedHtml(pageContent);
         throw new Error("Incapsula bypass не удался — challenge всё ещё присутствует после инъекции cookies");
       }
@@ -413,6 +703,14 @@ class SimpleLoginBot {
 
   #throwIfProxyBlockedHtml(html) {
     if (!html || typeof html !== "string") {
+      return;
+    }
+
+    const hasSolvableChallengeMarker =
+      html.includes("_Incapsula_Resource?SWJIYLWA=") ||
+      html.includes("SWJIYLWA=");
+
+    if (hasSolvableChallengeMarker) {
       return;
     }
 
@@ -434,6 +732,8 @@ class SimpleLoginBot {
 
   async checkLoginForm(page) {
     try {
+      await this.waitForQueueRedirect(page);
+
       console.log("🔄 Ожидание полной загрузки всех скриптов...");
 
       await page.waitForLoadState("networkidle", { timeout: 15000 });
@@ -475,6 +775,10 @@ class SimpleLoginBot {
         const pageTitle = await page.title();
         console.log(`📄 Заголовок страницы: ${pageTitle}`);
 
+        if (await this.isQueueItPage(page)) {
+          console.log("ℹ️ Login form is not expected yet: still on Queue-it page");
+        }
+
         const licenseExists = await page.locator("#driving-licence-number").count();
         const referenceExists = await page.locator("#application-reference-number").count();
         const loginExists = await page.locator("#booking-login").count();
@@ -488,9 +792,11 @@ class SimpleLoginBot {
     }
   }
 
-  async humanTyping(page, selector, text) {
+  async humanTyping(page, selector, text, options = {}) {
     try {
       console.log(`⌨️ Человекоподобная печать с опечатками для селектора: ${selector}`);
+      const typoChance = options.typoChance ?? 0.05;
+      const pauseChance = options.pauseChance ?? 0.1;
 
       await this.moveMouseToElement(page, selector);
       await page.click(selector);
@@ -502,7 +808,7 @@ class SimpleLoginBot {
       for (let i = 0; i < text.length; i++) {
         const currentChar = text[i];
 
-        if (Math.random() < 0.05 && i > 0 && i < text.length - 1) {
+        if (Math.random() < typoChance && i > 0 && i < text.length - 1) {
           await this.makeTypingMistake(page, selector, text, i);
           continue;
         }
@@ -512,7 +818,7 @@ class SimpleLoginBot {
         const delay = Math.random() * 150 + 50;
         await this.sleep(delay);
 
-        if (Math.random() < 0.1) {
+        if (Math.random() < pauseChance) {
           await this.sleep(Math.random() * 500 + 200);
         }
       }
@@ -714,6 +1020,61 @@ class SimpleLoginBot {
     console.log("❌ Промежуточная страница не исчезла после 3 попыток, продолжаем...");
   }
 
+  async waitForManagePageResult(page, timeoutMs = 30000) {
+    console.log("⏳ Ожидание финального состояния страницы после логина...");
+    const startedAt = Date.now();
+    let lastUrl = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      await this.waitForImpervaInterstitial(page, Math.min(30000, timeoutMs));
+      await this.waitForQueueRedirect(page, Math.min(30000, timeoutMs));
+
+      const currentUrl = page.url();
+      if (currentUrl !== lastUrl) {
+        lastUrl = currentUrl;
+        console.log(`📍 Post-login URL: ${currentUrl}`);
+      }
+
+      const loginError = await this.checkForLoginError(page);
+      if (loginError.hasError) {
+        return {
+          state: "login_error",
+          message: loginError.message,
+          errorType: loginError.type
+        };
+      }
+
+      const loginPageReady = await this.isLoginPageReady(page);
+      if (loginPageReady) {
+        return {
+          state: "login_page",
+          message: "Returned to login page after authentication flow"
+        };
+      }
+
+      const hasCaptcha = await this.checkForIncapsula(page);
+      if (hasCaptcha) {
+        return {
+          state: "captcha"
+        };
+      }
+
+      const isViewBookingPage = await this.checkViewBookingPage(page);
+      if (isViewBookingPage) {
+        return {
+          state: "view_booking"
+        };
+      }
+
+      await this.sleep(2000);
+    }
+
+    return {
+      state: "timeout",
+      message: "Timed out waiting for final post-login page"
+    };
+  }
+
   async checkViewBookingPage(page) {
     try {
       console.log("🔍 Проверка страницы View booking...");
@@ -721,11 +1082,14 @@ class SimpleLoginBot {
       const viewBookingHeader = await page.locator('h1:has-text("View booking")').isVisible({ timeout: 5000 });
       const bodyId = await page.evaluate(() => document.body.id);
       const correctBodyId = bodyId === "page-ibs-summary";
-      const testCentreButton = await page.locator("#test-centre-change").isVisible({ timeout: 3000 });
+      const testCentreButton = await page.locator("#test-centre-change").isVisible({ timeout: 3000 }).catch(() => false);
+      const bookingDetailsSection = await page.locator("#confirm-booking-details").isVisible({ timeout: 3000 }).catch(() => false);
+      const signOutButton = await page.locator('a:has-text("Sign out")').isVisible({ timeout: 3000 }).catch(() => false);
 
-      console.log(`📊 View booking проверки: заголовок=${viewBookingHeader}, body id=${correctBodyId}, кнопка=${testCentreButton}`);
+      console.log(`📊 View booking проверки: заголовок=${viewBookingHeader}, body id=${correctBodyId}, test-centre=${testCentreButton}, details=${bookingDetailsSection}, signout=${signOutButton}`);
 
-      const isViewBookingPage = viewBookingHeader && correctBodyId && testCentreButton;
+      const hasStableBookingUi = testCentreButton || bookingDetailsSection || signOutButton;
+      const isViewBookingPage = viewBookingHeader && correctBodyId && hasStableBookingUi;
 
       if (isViewBookingPage) {
         console.log("✅ Успешно попали на страницу View booking");
