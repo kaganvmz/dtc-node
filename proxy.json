@@ -1,10 +1,11 @@
 {
     "proxy_source": "config",
-    "host": "gate.multilogin.com", 
-    "password": "x0sxun0ssc",
-    "port": 1080, 
-    "type": "socks5", 
-    "username": "2235440328_ab94f23e_bbdc_41c6_b3a5_146189889db5_multilogin_com-country-gb-region-england-sid-{session_string}-filter-medium",
-    "proxy_change_by_url": false,
+    "host": "g6ip.com",
+    "password": "HdItMXPf",
+    "port": 5648,
+    "type": "socks5",
+    "username": "HdItMXPf",
+    "proxy_change_by_url": true,
+    "proxy_change_url": "https://hilink.online/api/rotate/HdItMXPf",
     "proxy_file": "./proxies.txt"
 }

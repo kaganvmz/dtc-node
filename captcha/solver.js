@@ -4,104 +4,107 @@ import {
   CaptchaSolverWrongKeyException,
   CaptchaSolverTimeoutException,
 } from "./exceptions.js";
-// --- CaptchaSolver Class (Перевод из Python) ---
-export class CaptchaSolver {
-  static #apiServer = "https://rucaptcha.com/";
-  static #endpointCreateTask = "in.php";
-  static #endpointGetResults = "res.php";
 
-  constructor(serviceKey) {
-    this.serviceKey = serviceKey;
-    // В Node.js fetch доступен глобально, как и requests.Session в Python
+import pkg from '@zennolab_com/capmonstercloud-client';
+const { CapMonsterCloudClientFactory, ClientOptions, ImpervaRequest } = pkg;
+
+/**
+ * Imperva/Incapsula bypass solver using CapMonster Cloud SDK.
+ * Replaces the old CaptchaSolver (RuCaptcha hCaptcha).
+ */
+export class ImpervaBypassSolver {
+  constructor(apiKey) {
+    this.apiKey = apiKey;
+    this.client = CapMonsterCloudClientFactory.Create(
+      new ClientOptions({ clientKey: apiKey })
+    );
   }
 
   /**
-   * Solves an hCaptcha.
-   * @param {string} pageurl - The URL of the page where the hCaptcha is located.
-   * @param {string} sitekey - The sitekey of the hCaptcha.
-   * @param {string} ua - The User-Agent string to use.
-   * @returns {Promise<string>} The hCaptcha token.
-   * @throws {CaptchaSolverException} If there's an error during solving.
+   * Check CapMonster balance.
+   * @returns {Promise<number>} Balance in USD.
    */
-  async solveHcaptcha(pageurl, sitekey, ua) {
-    const taskId = await this.createTask(pageurl, sitekey, "hcaptcha", ua);
-    console.log(taskId);
-    const token = await this.getResult(taskId);
-    return token;
-  }
-
-  /**
-   * Creates a new captcha solving task.
-   * @param {string} pageurl - The URL of the page.
-   * @param {string} sitekey - The sitekey.
-   * @param {string} method - The captcha method (e.g., "hcaptcha").
-   * @param {string} ua - The User-Agent string.
-   * @returns {Promise<string>} The task ID.
-   * @throws {CaptchaSolverException} On API errors.
-   */
-  async createTask(pageurl, sitekey, method, ua) {
-    const data = new URLSearchParams({
-      pageurl: pageurl,
-      method: method,
-      sitekey: sitekey,
-      userAgent: ua,
-      key: this.serviceKey
-    });
-    console.log(data);
-    const res = await fetch(`${CaptchaSolver.#apiServer}${CaptchaSolver.#endpointCreateTask}`, {
-      method: 'POST',
-      body: data
-    });
-
-    const result = await res.text();
-    const [status, taskIdOrError] = result.split("|");
-    console.log('taskIdOrError', result);
-    if (status !== "OK") {
-      if (status === "ERROR_KEY_DOES_NOT_EXIST") {
-        throw new CaptchaSolverWrongKeyException("Check your API key");
-      }
-      if (status === "ERROR_ZERO_BALANCE") {
-        throw new CaptchaSolverZeroBalanceException("Check your account balance");
-      }
-      throw new CaptchaSolverException(taskIdOrError);
+  async getBalance() {
+    try {
+      const balance = await this.client.getBalance();
+      return balance;
+    } catch (error) {
+      throw new CaptchaSolverException(`Balance check failed: ${error.message}`);
     }
-    return taskIdOrError;
   }
 
   /**
-   * Retrieves the result of a captcha solving task.
-   * @param {string} taskId - The ID of the task.
-   * @returns {Promise<string>} The captcha token.
-   * @throws {CaptchaSolverException} On API errors or timeout.
+   * Solve Imperva/Incapsula protection.
+   * @param {string} websiteURL - Target page URL.
+   * @param {string} userAgent - Browser user agent (Windows only).
+   * @param {object} metadata - { incapsulaScriptUrl, incapsulaCookies, reese84UrlEndpoint? }
+   * @param {object} proxy - { type, host, port, username, password }
+   * @returns {Promise<object>} Solution with domains and cookies.
    */
-  async getResult(taskId) {
-    const params = new URLSearchParams({
-      action: "get",
-      key: this.serviceKey,
-      id: taskId
-    });
+  async solve(websiteURL, userAgent, metadata, proxy) {
+    try {
+      console.log("🛡️ Отправка Imperva задачи в CapMonster...");
+      console.log(`📤 websiteURL: ${websiteURL}`);
+      console.log(`📤 incapsulaScriptUrl: ${metadata.incapsulaScriptUrl}`);
+      console.log(`📤 incapsulaCookies: ${metadata.incapsulaCookies?.substring(0, 80)}...`);
+      console.log(`📤 proxy: ${proxy.type}://${proxy.host}:${proxy.port}`);
 
-    const solvingStartTime = Date.now(); // Use Date.now() for milliseconds
-    const timeout = 120 * 1000; // 120 seconds in milliseconds
-
-    while (true) {
-      if (Date.now() - solvingStartTime > timeout) {
-        throw new CaptchaSolverTimeoutException();
+      const taskMetadata = {
+        incapsulaScriptUrl: metadata.incapsulaScriptUrl,
+        incapsulaCookies: metadata.incapsulaCookies,
+      };
+      if (metadata.reese84UrlEndpoint) {
+        taskMetadata.reese84UrlEndpoint = metadata.reese84UrlEndpoint;
       }
 
-      // Wait for 4 seconds before polling again
-      await new Promise(resolve => setTimeout(resolve, 4000));
+      const request = new ImpervaRequest({
+        websiteURL,
+        userAgent,
+        metadata: taskMetadata,
+        proxy: {
+          proxyType: proxy.type === "socks5" ? "socks5" : "http",
+          proxyAddress: proxy.host,
+          proxyPort: proxy.port,
+          proxyLogin: proxy.username,
+          proxyPassword: proxy.password,
+        },
+      });
 
-      const res = await fetch(`${CaptchaSolver.#apiServer}${CaptchaSolver.#endpointGetResults}?${params.toString()}`);
-      const result = await res.text();
+      const result = await this.client.Solve(request);
 
-      if (result !== "CAPCHA_NOT_READY") {
-        const [status, tokenOrError] = result.split("|");
-        if (status !== "OK") {
-          throw new CaptchaSolverException(tokenOrError);
-        }
-        return tokenOrError;
+      console.log("✅ CapMonster Imperva решение получено");
+      console.log("📦 Полный результат SDK:", JSON.stringify(result, null, 2));
+
+      // SDK возвращает CaptchaResult { solution: ... }
+      // solution может быть на верхнем уровне или внутри .solution
+      const solution = result?.solution || result;
+
+      if (!solution || (typeof solution === 'object' && Object.keys(solution).length === 0)) {
+        throw new CaptchaSolverException("Empty solution from CapMonster");
       }
+
+      // Если solution содержит domains — это правильный ответ Imperva
+      // Если solution сам по себе содержит cookies — тоже ок
+      return solution;
+
+    } catch (error) {
+      if (error instanceof CaptchaSolverException) {
+        throw error;
+      }
+
+      const msg = error.message || String(error);
+
+      if (msg.includes("ERROR_KEY_DOES_NOT_EXIST")) {
+        throw new CaptchaSolverWrongKeyException("Invalid CapMonster API key");
+      }
+      if (msg.includes("ERROR_ZERO_BALANCE")) {
+        throw new CaptchaSolverZeroBalanceException("CapMonster balance is zero");
+      }
+      if (msg.includes("TIMEOUT") || msg.includes("timeout")) {
+        throw new CaptchaSolverTimeoutException("CapMonster solve timeout");
+      }
+
+      throw new CaptchaSolverException(`Imperva bypass failed: ${msg}`);
     }
   }
 }

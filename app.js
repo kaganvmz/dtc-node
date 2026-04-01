@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config()
 import { chromium } from "playwright";
-import { CaptchaSolver } from "./captcha/solver.js";
+import { ImpervaBypassSolver } from "./captcha/solver.js";
 import { MultiloginAPI } from "./multilogin/multilogin.js";
 import { TasksAPI } from "./api/TasksAPI.js";
 import fs from 'fs';
@@ -50,9 +50,9 @@ class SimpleLoginBot {
     await this.multiloginAPI.apiInit();
     console.log("✅ Multilogin API инициализирован");
 
-    // Captcha Solver
-    this.captchaSolver = new CaptchaSolver(this.captchaApiKey);
-    console.log("✅ Captcha Solver инициализирован");
+    // Imperva Bypass Solver (CapMonster Cloud)
+    this.captchaSolver = new ImpervaBypassSolver(this.captchaApiKey);
+    console.log("✅ Imperva Bypass Solver инициализирован");
 
     // Tasks API
     this.tasksAPI = new TasksAPI(this.tasksApiToken, this.workerName);
@@ -115,10 +115,10 @@ class SimpleLoginBot {
       const page = await this.navigateToPage(browser);
 
       // 4. Проверить капчу
-      const hasCaptcha = await this.checkForCaptcha(page);
+      const hasCaptcha = await this.checkForIncapsula(page);
       if (hasCaptcha) {
-        console.log("🧩 Обнаружена капча, решаем...");
-        await this.solveCaptcha(page);
+        console.log("🛡️ Обнаружена Incapsula, обходим...");
+        await this.bypassIncapsula(page);
       }
 
       // 5. Проверить форму логина
@@ -187,6 +187,7 @@ class SimpleLoginBot {
         console.log("📝 Создание нового профиля...");
         const currentProxy = this.multiloginAPI.getCurrentProxy();
         const formattedProxy = this.multiloginAPI.proxyManager.formatForMultilogin(currentProxy);
+        console.log("📤 Прокси для профиля:", JSON.stringify(formattedProxy, null, 2));
 
         const createResult = await this.multiloginAPI.createProfile(
           profileName,
@@ -197,6 +198,11 @@ class SimpleLoginBot {
         if (createResult?.status?.http_code === 201 && Array.isArray(createResult?.data?.ids) && createResult.data.ids.length > 0) {
           const profileId = createResult.data.ids[0];
           console.log(`✅ Профиль создан с ID: ${profileId}`);
+
+          // Назначаем прокси отдельным вызовом — Multilogin игнорирует proxy в createProfile
+          const updateResult = await this.multiloginAPI.updateProfileProxy(profileId, formattedProxy);
+          console.log(`📤 Результат назначения прокси: ${JSON.stringify(updateResult?.status)}`);
+
           return profileId;
         } else {
           throw new Error(`Ошибка создания профиля: ${createResult?.status?.message || 'Некорректный ответ API'}`);
@@ -220,8 +226,22 @@ class SimpleLoginBot {
     console.log(`🌐 Запуск браузера для профиля ${profileId}...`);
 
     try {
-      // Запуск профиля Multilogin
+      // Запуск профиля Multilogin (с retry при скачивании core)
       let startResult = await this.multiloginAPI.startProfile(profileId);
+
+      // Ожидание скачивания core если началось
+      const coreDownloadMaxRetries = 12; // максимум ~2 минуты
+      let coreRetry = 0;
+      while (startResult.status.error_code === 'CORE_DOWNLOADING_STARTED' && coreRetry < coreDownloadMaxRetries) {
+        coreRetry++;
+        console.log(`⏳ Core браузера скачивается... попытка ${coreRetry}/${coreDownloadMaxRetries}, ждём 10 сек...`);
+        await new Promise(r => setTimeout(r, 10000));
+        startResult = await this.multiloginAPI.startProfile(profileId);
+      }
+
+      if (startResult.status.error_code === 'CORE_DOWNLOADING_STARTED') {
+        throw new Error('Core браузера не успел скачаться. Попробуйте позже.');
+      }
 
       // Обработка ошибки прокси
       if (startResult.status.http_code !== 200 && startResult.status.error_code === 'GET_PROXY_CONNECTION_IP_ERROR') {
@@ -258,8 +278,8 @@ class SimpleLoginBot {
   }
 
   async getWebSocketEndpoint(port) {
-    const maxRetries = 5;
-    const retryDelay = 1000;
+    const maxRetries = 10;
+    const retryDelay = 2000;
 
     for (let i = 0; i < maxRetries; i++) {
       try {
@@ -309,113 +329,242 @@ class SimpleLoginBot {
   }
 
   // ===============================
-  // ПРОВЕРКА КАПЧИ
+  // ПРОВЕРКА INCAPSULA
   // ===============================
-  async checkForCaptcha(page) {
+  async checkForIncapsula(page) {
     try {
       await page.waitForSelector('#main-iframe', { timeout: 5000 });
-      console.log("🧩 Iframe с капчей найден");
+      console.log("🛡️ Incapsula challenge обнаружен");
       return true;
     } catch (error) {
-      console.log("ℹ️ Iframe с капчей не найден");
+      console.log("ℹ️ Incapsula challenge не обнаружен");
       return false;
     }
   }
 
-  async solveCaptcha(page) {
+  // ===============================
+  // BYPASS INCAPSULA (CapMonster)
+  // ===============================
+  async bypassIncapsula(page) {
     try {
-      // Ждем полной загрузки iframe перед извлечением данных
-      console.log("🔄 Ожидание загрузки iframe с капчей...");
-      await page.waitForFunction(() => {
-        const iframe = document.getElementById("main-iframe");
-        return iframe &&
-               iframe.contentWindow &&
-               iframe.contentWindow.document &&
-               iframe.contentWindow.document.readyState === 'complete' &&
-               iframe.contentWindow.location.href !== 'about:blank';
-      }, { timeout: 15000 });
+      console.log("🛡️ Запуск обхода Incapsula через CapMonster...");
 
-      // Дополнительная пауза для загрузки капчи
-      await this.sleep(3000);
+      // Проверяем IP браузера для отладки
+      try {
+        const ipPage = await page.context().newPage();
+        await ipPage.goto('https://api.ipify.org?format=json', { timeout: 10000 });
+        const ipData = await ipPage.evaluate(() => document.body.innerText);
+        console.log(`🌍 IP браузера: ${ipData}`);
+        await ipPage.close();
+      } catch (e) {
+        console.log(`⚠️ Не удалось проверить IP браузера: ${e.message}`);
+      }
 
-      const captchaData = await page.evaluate(() => {
-        const targetIframe = document.getElementById("main-iframe");
-        // Если iframe не найден или его contentWindow недоступен
-        if (!targetIframe || !targetIframe.contentWindow) {
-          return { "sitekey": null, "siteurl": null, "ua": null, "status": "no-iframe" };
+      // A. Извлечь incapsulaScriptUrl — polling до 15 сек, ищем в #main-iframe
+      let incapsulaScriptUrl = null;
+      const swjiylwaSearchStart = Date.now();
+
+      const extractSwjiylwa = async (frame) => {
+        try {
+          return await frame.evaluate(() => {
+            const scripts = Array.from(document.querySelectorAll('script[src]'));
+            const found = scripts.find(s => s.src.includes('SWJIYLWA'));
+            if (found) {
+              try { const u = new URL(found.src); return u.pathname.substring(1) + u.search; }
+              catch { return found.src; }
+            }
+            const entries = performance.getEntriesByType('resource');
+            const entry = entries.find(e => e.name.includes('SWJIYLWA'));
+            if (entry) {
+              try { const u = new URL(entry.name); return u.pathname.substring(1) + u.search; }
+              catch { return null; }
+            }
+            const match = document.documentElement.outerHTML.match(/_Incapsula_Resource\?SWJIYLWA=[^"'\s<]*/);
+            return match ? match[0] : null;
+          });
+        } catch { return null; }
+      };
+
+      while (!incapsulaScriptUrl && Date.now() - swjiylwaSearchStart < 15000) {
+        // Ищем в основной странице
+        incapsulaScriptUrl = await extractSwjiylwa(page.mainFrame());
+
+        // Ищем внутри #main-iframe через contentFrame()
+        if (!incapsulaScriptUrl) {
+          try {
+            const iframeEl = await page.$('#main-iframe');
+            if (iframeEl) {
+              const iframeFrame = await iframeEl.contentFrame();
+              if (iframeFrame) {
+                await iframeFrame.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+                incapsulaScriptUrl = await extractSwjiylwa(iframeFrame);
+                if (!incapsulaScriptUrl) {
+                  // Логируем что внутри iframe для отладки
+                  const iframeHtml = await iframeFrame.evaluate(() => document.documentElement.outerHTML).catch(() => '');
+                  if (iframeHtml) {
+                    console.log(`📄 iframe HTML (первые 500): ${iframeHtml.substring(0, 500)}`);
+                  }
+                }
+              }
+            }
+          } catch { /* ignore */ }
         }
-        const iframeDocument = targetIframe.contentWindow.document;
 
-        const isBlocked = iframeDocument.getElementsByClassName("error-code").length > 0;
-        if (isBlocked) {
-          return { "sitekey": false, "siteurl": false, "ua": window.navigator.userAgent, "status": "blocked" };
+        if (!incapsulaScriptUrl) await this.sleep(2000);
+      }
+
+      console.log(`📤 incapsulaScriptUrl: ${incapsulaScriptUrl || 'НЕ НАЙДЕН'}`);
+      if (!incapsulaScriptUrl) {
+        // Логируем HTML для отладки
+        const html = await page.content();
+        console.log(`📄 HTML страницы (первые 2000 символов):\n${html.substring(0, 2000)}`);
+        throw new Error("Не удалось найти incapsulaScriptUrl (_Incapsula_Resource?SWJIYLWA=...) на странице");
+      }
+
+      // B. Извлечь incapsulaCookies
+      const allCookies = await page.context().cookies();
+      const incapsulaCookies = allCookies
+        .filter(c => c.name.startsWith('incap_ses_') || c.name.startsWith('visid_incap_'))
+        .map(c => `${c.name}=${c.value}`)
+        .join('; ');
+
+      console.log(`📤 incapsulaCookies: ${incapsulaCookies ? incapsulaCookies.substring(0, 80) + '...' : 'НЕ НАЙДЕНЫ'}`);
+      if (!incapsulaCookies) {
+        throw new Error("Не удалось найти cookies Incapsula (incap_ses_* / visid_incap_*)");
+      }
+
+      // C. Извлечь reese84UrlEndpoint (опционально)
+      // Это endpoint куда отправляется reese84 fingerprint, заканчивается на ?d=site.com
+      const reese84UrlEndpoint = await page.evaluate(() => {
+        const entries = performance.getEntriesByType('resource');
+        // Логируем все entries для отладки
+        const allPaths = entries.map(e => {
+          try { return new URL(e.name).pathname; } catch { return e.name; }
+        });
+        console.log('All resource entries paths:', JSON.stringify(allPaths));
+
+        // Ищем запрос с ?d= в URL (fingerprint endpoint)
+        const reese = entries.find(e => {
+          try {
+            const url = new URL(e.name);
+            return url.search.includes('?d=') && !url.pathname.includes('_Incapsula_Resource');
+          } catch { return false; }
+        });
+        if (reese) {
+          try {
+            const url = new URL(reese.name);
+            return url.pathname.substring(1); // без ведущего /
+          } catch { return null; }
         }
-
-        const siteurl = iframeDocument.location.href;
-
-        // Проверяем различные селекторы для hCaptcha
-        let hcaptchaElements = iframeDocument.getElementsByClassName("h-captcha");
-        if (hcaptchaElements.length === 0) {
-          // Пробуем альтернативные селекторы
-          hcaptchaElements = iframeDocument.querySelectorAll('[data-sitekey]');
-        }
-        if (hcaptchaElements.length === 0) {
-          hcaptchaElements = iframeDocument.querySelectorAll('.h-captcha, [class*="captcha"], [id*="captcha"]');
-        }
-
-        if (hcaptchaElements.length === 0) {
-          console.log('Iframe content:', iframeDocument.documentElement.outerHTML.substring(0, 500));
-          return { "sitekey": null, "siteurl": siteurl, "ua": window.navigator.userAgent, "status": "no-captcha" };
-        }
-
-        console.log('hcaptchaElements found:', hcaptchaElements.length);
-        console.log('First element:', hcaptchaElements[0]);
-
-        // Извлекаем sitekey из первого найденного элемента
-        let sitekey = hcaptchaElements[0].getAttribute("data-sitekey");
-
-        // Если sitekey не найден в data-sitekey, ищем в других атрибутах
-        if (!sitekey) {
-          sitekey = hcaptchaElements[0].getAttribute("site-key") ||
-                   hcaptchaElements[0].getAttribute("sitekey") ||
-                   hcaptchaElements[0].dataset.sitekey;
-        }
-
-        console.log('Extracted sitekey:', sitekey);
-        return { "sitekey": sitekey, "siteurl": siteurl, "ua": window.navigator.userAgent, "status": "ready" };
+        return null;
       });
-      console.log('captchaData', captchaData);
-      if (!captchaData) {
-        throw new Error("Не удалось получить данные капчи");
+
+      if (reese84UrlEndpoint) {
+        console.log(`📤 reese84UrlEndpoint: ${reese84UrlEndpoint}`);
+      } else {
+        console.log("ℹ️ reese84UrlEndpoint не найден (опциональный параметр)");
       }
 
-      // Проверяем, что sitekey действительно получен
-      if (!captchaData.sitekey || captchaData.sitekey === 'null') {
-        throw new Error(`Sitekey не найден или пустой. Status: ${captchaData.status}, URL: ${captchaData.siteurl}`);
+      // D. Получить прокси (тот же что использует браузер)
+      const currentProxy = this.multiloginAPI.getCurrentProxy();
+      console.log(`📤 proxy: ${currentProxy.type}://${currentProxy.host}:${currentProxy.port}`);
+      console.log(`📤 proxy username: ${currentProxy.username}`);
+
+      // E. Получить userAgent
+      const userAgent = await page.evaluate(() => navigator.userAgent);
+
+      // F. Вызвать солвер
+      const metadata = {
+        incapsulaScriptUrl,
+        incapsulaCookies,
+      };
+      if (reese84UrlEndpoint) {
+        metadata.reese84UrlEndpoint = reese84UrlEndpoint;
       }
 
-      console.log("🔑 Решение hCaptcha...");
-      const token = await this.captchaSolver.solveHcaptcha(
-        captchaData.siteurl,
-        captchaData.sitekey,
-        captchaData.ua
+      const solution = await this.captchaSolver.solve(
+        page.url(),
+        userAgent,
+        metadata,
+        currentProxy
       );
 
-      // Отправляем токен в iframe
-      await page.evaluate(({ token }) => {
-        const iframe = document.getElementById("main-iframe");
-        if (iframe && iframe.contentWindow) {
-          const iframeWindow = iframe.contentWindow;
-          if (typeof iframeWindow.onCaptchaFinished === 'function') {
-            iframeWindow.onCaptchaFinished(token);
-          }
-        }
-      }, { token });
+      console.log("✅ Решение получено от CapMonster:");
+      console.log(JSON.stringify(solution, null, 2));
 
-      console.log("✅ Капча решена и токен отправлен");
+      // G. Удалить только fingerprint cookies (visid_incap, incap_ses, utmvc, reese84)
+      // НЕ удаляем nlbi_* — load balancer cookies нужны для правильного роутинга
+      const existingCookies = await page.context().cookies();
+      const incapCookieNames = existingCookies
+        .filter(c => /^(incap_ses_|visid_incap_|___utmvc|reese84)/.test(c.name))
+        .map(c => c.name);
+      if (incapCookieNames.length > 0) {
+        console.log(`🗑️ Удаляем ${incapCookieNames.length} старых Incapsula cookies: ${incapCookieNames.join(', ')}`);
+        await page.context().clearCookies({ name: new RegExp('^(incap_ses_|visid_incap_|___utmvc|reese84)') });
+      }
+
+      console.log("Инжектим cookies...");
+
+      // H. Инжектить новые cookies из CapMonster
+      const domains = solution.domains || solution;
+      let cookiesInjected = 0;
+
+      for (const [, domainData] of Object.entries(domains)) {
+        const cookies = domainData.cookies || domainData;
+        for (const [cookieName, cookieValue] of Object.entries(cookies)) {
+          // cookieValue может содержать "; Max-Age=..." и другие параметры
+          const value = cookieValue.split(';')[0].trim();
+          await page.context().addCookies([{
+            name: cookieName,
+            value: value,
+            domain: '.driverpracticaltest.dvsa.gov.uk',
+            path: '/',
+            secure: true,
+            sameSite: 'None',
+          }]);
+          cookiesInjected++;
+          console.log(`🍪 Cookie добавлен: ${cookieName}=${value.substring(0, 40)}...`);
+        }
+      }
+
+      if (cookiesInjected === 0) {
+        throw new Error("CapMonster не вернул cookies в решении");
+      }
+
+      // Логируем все cookies перед навигацией
+      const allCookiesAfter = await page.context().cookies();
+      const incapCookiesAfter = allCookiesAfter.filter(c => /incap|utmvc|reese84|nlbi/.test(c.name));
+      console.log(`✅ ${cookiesInjected} cookies инжектировано. Все Incapsula cookies (${incapCookiesAfter.length}): ${incapCookiesAfter.map(c => c.name).join(', ')}`);
+
+      // I. Navigate — чтобы cookies отправились с чистым запросом
+      const targetURL = page.url();
+      console.log(`🔄 Навигация на ${targetURL}...`);
+      await page.goto(targetURL, { waitUntil: 'networkidle', timeout: CONFIG.TIMEOUTS.PAGE_LOAD });
+      await this.sleep(8000);
+
+      // Проверяем на Access Denied (Error 15/16 — IP блокировка DVSA)
+      const pageContent = await page.content();
+      if (pageContent.includes('Access Denied') || pageContent.includes('Error 15') || pageContent.includes('Error 16')) {
+        const errorMatch = pageContent.match(/Error (\d+)/);
+        const errorNum = errorMatch ? errorMatch[1] : 'unknown';
+        console.log(`🚫 DVSA Access Denied (Error ${errorNum}) — IP заблокирован`);
+        throw new Error(`DVSA заблокировал IP (Error ${errorNum}). Нужна ротация прокси.`);
+      }
+
+      // Проверяем что bypass прошёл
+      const stillBlocked = await this.checkForIncapsula(page);
+      if (stillBlocked) {
+        // Логируем URL и часть контента для отладки
+        console.log(`📍 URL после reload: ${page.url()}`);
+        const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 300));
+        console.log(`📄 Контент страницы: ${bodyText}`);
+        throw new Error("Incapsula bypass не удался — challenge всё ещё присутствует после инъекции cookies");
+      }
+
+      console.log("✅ Incapsula bypass успешен!");
 
     } catch (error) {
-      console.error("❌ Ошибка решения капчи:", error.message);
+      console.error("❌ Ошибка обхода Incapsula:", error.message);
       throw error;
     }
   }
@@ -551,11 +700,11 @@ class SimpleLoginBot {
 
       // ВАЖНО: Проверяем капчу после промежуточной страницы (может появиться между логином и переходом на /manage)
       console.log("🔍 Проверяем наличие капчи после промежуточной страницы...");
-      const hasCaptchaAfterInterstitial = await this.checkForCaptcha(page);
+      const hasCaptchaAfterInterstitial = await this.checkForIncapsula(page);
       if (hasCaptchaAfterInterstitial) {
-        console.log("🧩 Обнаружена капча после промежуточной страницы, решаем...");
+        console.log("🛡️ Обнаружена Incapsula после промежуточной страницы, обходим...");
         try {
-          await this.solveCaptcha(page);
+          await this.bypassIncapsula(page);
           console.log("✅ Капча после промежуточной страницы решена успешно");
 
           // Дополнительная пауза после решения капчи
@@ -576,11 +725,11 @@ class SimpleLoginBot {
         console.log("✅ Логин успешен! Проверяем наличие капчи после логина...");
 
         // ВАЖНО: Сначала проверяем капчу после логина
-        const hasCaptchaAfterLogin = await this.checkForCaptcha(page);
+        const hasCaptchaAfterLogin = await this.checkForIncapsula(page);
         if (hasCaptchaAfterLogin) {
-          console.log("🧩 Обнаружена капча после логина, решаем...");
+          console.log("🛡️ Обнаружена Incapsula после логина, обходим...");
           try {
-            await this.solveCaptcha(page);
+            await this.bypassIncapsula(page);
             console.log("✅ Капча после логина решена успешно");
 
             // Дополнительная пауза после решения капчи
@@ -1015,11 +1164,11 @@ class SimpleLoginBot {
       }
 
       // 7. Проверка капчи на новой странице
-      const hasCaptcha = await this.checkForCaptcha(page);
+      const hasCaptcha = await this.checkForIncapsula(page);
       if (hasCaptcha) {
-        console.log("🧩 Обнаружена капча на странице Test centre, решаем...");
+        console.log("🛡️ Обнаружена Incapsula на странице Test centre, обходим...");
         try {
-          await this.solveCaptcha(page);
+          await this.bypassIncapsula(page);
           console.log("✅ Капча на странице Test centre решена");
         } catch (error) {
           console.error("❌ Ошибка решения капчи на странице Test centre:", error.message);
@@ -2151,7 +2300,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Получаем credentials из переменных окружения
   const multiloginEmail = process.env.MULTILOGIN_EMAIL;
   const multiloginPassword = process.env.MULTILOGIN_PASSWORD;
-  const captchaApiKey = process.env.RUCAPTCHA_API_KEY;
+  const captchaApiKey = process.env.CAPMONSTER_API_KEY;
   const tasksApiToken = process.env.TASKS_API_TOKEN;
   const workerName = process.env.WORKER_NAME || "worker-1";
   console.log(`Запуск бота от имени: ${JSON.stringify(process.env)}`);
