@@ -112,6 +112,19 @@ export class ProxyManager {
     return proxyReturn;
   }
 
+  async triggerConfigProxyRotation() {
+    if (!this.proxyDict.proxy_change_by_url || !this.proxyDict.proxy_change_url) {
+      return;
+    }
+
+    try {
+      await fetch(this.proxyDict.proxy_change_url, { method: "GET" });
+      await this.sleep(5000);
+    } catch (error) {
+      throw new ProxyChangeTimeoutException(`Failed to trigger proxy rotation: ${error.message}`);
+    }
+  }
+
   /**
    * Gets proxy from file list with rotation.
    * @param {number} threadId - The thread identifier.
@@ -322,6 +335,15 @@ export class ProxyManager {
       // Generate new session for config-based proxy
       return this.getProxyFromConfig();
     }
+  }
+
+  async forceRotateProxyAsync(threadId = 1) {
+    if (this.proxyDict.proxy_source === "file") {
+      return this.forceRotateProxy(threadId);
+    }
+
+    await this.triggerConfigProxyRotation();
+    return this.getProxyFromConfig();
   }
 
   /**

@@ -1,11 +1,11 @@
 {
     "proxy_source": "config",
     "host": "g6ip.com",
-    "password": "HdItMXPf",
-    "port": 5648,
+    "password": "jCJFbntW",
+    "port": 5045,
     "type": "socks5",
-    "username": "HdItMXPf",
+    "username": "jCJFbntW",
     "proxy_change_by_url": true,
-    "proxy_change_url": "https://hilink.online/api/rotate/HdItMXPf",
+    "proxy_change_url": "https://hilink.online/api/rotate/jCJFbntW",
     "proxy_file": "./proxies.txt"
 }

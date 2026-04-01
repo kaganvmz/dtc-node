@@ -101,7 +101,10 @@ export class MultiloginAPI {
       try {
         const response = await requestFunction();
         const jsonResponse = await response.json();
-        console.log("Response received:", jsonResponse);
+        const status = jsonResponse?.status;
+        if (status) {
+          console.log(`MLX response: http=${status.http_code} code=${status.error_code || "-"} msg=${status.message || "-"}`);
+        }
         // Check for token expiration in the response body
         const errorCode = jsonResponse?.status?.error_code;
         if (errorCode === "EXPIRED_JWT_TOKEN" || errorCode === "UNAUTHORIZED_REQUEST") {
@@ -319,7 +322,14 @@ export class MultiloginAPI {
   rotateProxy(threadId = 1) {
     console.log("🔄 Rotating proxy...");
     this.currentProxyConfig = this.proxyManager.forceRotateProxy(threadId);
-    console.log(`✅ New proxy: ${this.currentProxyConfig.host}:${this.currentProxyConfig.port}`);
+    console.log(`✅ Proxy config rotated: ${this.currentProxyConfig.host}:${this.currentProxyConfig.port}`);
+    return this.currentProxyConfig;
+  }
+
+  async rotateProxyAsync(threadId = 1) {
+    console.log("🔄 Rotating proxy...");
+    this.currentProxyConfig = await this.proxyManager.forceRotateProxyAsync(threadId);
+    console.log(`✅ Proxy rotation requested: ${this.currentProxyConfig.host}:${this.currentProxyConfig.port}`);
     return this.currentProxyConfig;
   }
 
@@ -365,7 +375,7 @@ export class MultiloginAPI {
 
         if (attempt < maxRetries) {
           // Rotate to next proxy for retry
-          currentProxy = this.rotateProxy();
+          currentProxy = await this.rotateProxyAsync();
           await this.sleep(2000); // Brief pause between attempts
         } else {
           throw new MultiloginException(`Failed to update proxy after ${maxRetries} attempts: ${error.message}`);
@@ -406,7 +416,7 @@ export class MultiloginAPI {
 
         if (attempt < maxRetries) {
           // Rotate proxy and update profile
-          const newProxy = this.rotateProxy();
+          const newProxy = await this.rotateProxyAsync();
           await this.updateProfileProxyWithRotation(profileId, newProxy, 1);
           await this.sleep(3000); // Pause before retry
         } else {

@@ -73,7 +73,8 @@ export class ImpervaBypassSolver {
       const result = await this.client.Solve(request);
 
       console.log("✅ CapMonster Imperva решение получено");
-      console.log("📦 Полный результат SDK:", JSON.stringify(result, null, 2));
+      const domains = Object.keys(result?.solution?.domains || result?.domains || {});
+      console.log(`📦 CapMonster domains: ${domains.length > 0 ? domains.join(", ") : "none"}`);
 
       // SDK возвращает CaptchaResult { solution: ... }
       // solution может быть на верхнем уровне или внутри .solution
