@@ -1,9 +1,10 @@
 import { chromium } from "playwright";
 
 class ProxyBlockedError extends Error {
-  constructor(message = "Proxy blocked by target site") {
+  constructor(message = "Proxy blocked by target site", options = {}) {
     super(message);
     this.name = "ProxyBlockedError";
+    this.bypassStage = options.bypassStage || null;
   }
 }
 
@@ -36,6 +37,24 @@ class SimpleLoginBot {
 
     console.log(`👀 Visual pause (${label}): ${this.visualPauseMs}ms`);
     await this.sleep(this.visualPauseMs);
+  }
+
+  async logBrowserExternalIp(page, label) {
+    try {
+      const ipPage = await page.context().newPage();
+      await ipPage.goto("https://api.ipify.org?format=json", { timeout: 10000 });
+      const ipData = await ipPage.evaluate(() => document.body.innerText);
+      console.log(`🌍 Browser external IP (${label}): ${ipData}`);
+      await ipPage.close();
+      return ipData;
+    } catch (error) {
+      console.log(`⚠️ Failed to fetch browser external IP (${label}): ${error.message}`);
+      return null;
+    }
+  }
+
+  createProxyBlockedError(message, bypassStage = "before_solver") {
+    return new ProxyBlockedError(message, { bypassStage });
   }
 
   async createProfile(profileName) {
@@ -324,11 +343,52 @@ class SimpleLoginBot {
     }
   }
 
+  #classifyIncapsulaHtml(html) {
+    if (!html || typeof html !== "string") {
+      return null;
+    }
+
+    const hasChallengeScriptMarker =
+      html.includes("_Incapsula_Resource?SWJIYLWA=") ||
+      html.includes("SWJIYLWA=");
+
+    const hasChallengeIframeMarker =
+      html.includes("SWUDNSAI=") &&
+      html.includes("edet=12");
+
+    const hasBlockedMarker =
+      html.includes("CWUDNSAI=") ||
+      html.includes("edet=15") ||
+      html.includes("edet=16") ||
+      html.includes("Error 15") ||
+      html.includes("Error 16");
+
+    if (hasChallengeScriptMarker || hasChallengeIframeMarker) {
+      return "captcha";
+    }
+
+    if (hasBlockedMarker) {
+      return "blocked";
+    }
+
+    return null;
+  }
+
   async checkForIncapsula(page) {
     try {
-      await page.waitForSelector("#main-iframe", { timeout: 5000 });
-      console.log("🛡️ Incapsula challenge обнаружен");
-      return true;
+      const pageType = await this.detectIncapsulaPageType(page);
+      if (pageType === "captcha") {
+        console.log("🛡️ Incapsula challenge обнаружен");
+        return true;
+      }
+
+      if (pageType === "blocked") {
+        console.log("🚫 Incapsula blocked page обнаружена");
+        return true;
+      }
+
+      console.log("ℹ️ Incapsula challenge не обнаружен");
+      return false;
     } catch {
       console.log("ℹ️ Incapsula challenge не обнаружен");
       return false;
@@ -336,42 +396,9 @@ class SimpleLoginBot {
   }
 
   async detectIncapsulaPageType(page) {
-    const inspectHtml = (html) => {
-      if (!html || typeof html !== "string") {
-        return null;
-      }
-
-      const hasSolvableChallengeMarker =
-        html.includes("_Incapsula_Resource?SWJIYLWA=") ||
-        html.includes("SWJIYLWA=");
-
-      const blockedMarkers = [
-        "CWUDNSAI=",
-        "edet=15",
-        "edet=16",
-        "incident_id=",
-        "[Error Title]",
-        "Request unsuccessful. Incapsula incident ID",
-        "Error 15",
-        "Error 16"
-      ];
-
-      const hasBlockedMarker = blockedMarkers.some((marker) => html.includes(marker));
-
-      if (hasSolvableChallengeMarker) {
-        return "captcha";
-      }
-
-      if (hasBlockedMarker) {
-        return "blocked";
-      }
-
-      return null;
-    };
-
     try {
       const mainHtml = await page.content().catch(() => "");
-      const mainType = inspectHtml(mainHtml);
+      const mainType = this.#classifyIncapsulaHtml(mainHtml);
       if (mainType) {
         return mainType;
       }
@@ -387,7 +414,7 @@ class SimpleLoginBot {
       }
 
       const iframeHtml = await iframeFrame.evaluate(() => document.documentElement.outerHTML).catch(() => "");
-      return inspectHtml(iframeHtml);
+      return this.#classifyIncapsulaHtml(iframeHtml);
     } catch {
       return null;
     }
@@ -397,7 +424,7 @@ class SimpleLoginBot {
     try {
       const pageTypeBeforeSolve = await this.detectIncapsulaPageType(page);
       if (pageTypeBeforeSolve === "blocked") {
-        throw new ProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.");
+        throw this.createProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.", "before_solver");
       }
 
       console.log("🛡️ Запуск обхода Incapsula через CapMonster...");
@@ -405,18 +432,10 @@ class SimpleLoginBot {
 
       const pageTypeAfterPause = await this.detectIncapsulaPageType(page);
       if (pageTypeAfterPause === "blocked") {
-        throw new ProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.");
+        throw this.createProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.", "before_solver");
       }
 
-      try {
-        const ipPage = await page.context().newPage();
-        await ipPage.goto("https://api.ipify.org?format=json", { timeout: 10000 });
-        const ipData = await ipPage.evaluate(() => document.body.innerText);
-        console.log(`🌍 IP браузера: ${ipData}`);
-        await ipPage.close();
-      } catch (error) {
-        console.log(`⚠️ Не удалось проверить IP браузера: ${error.message}`);
-      }
+      await this.logBrowserExternalIp(page, "before bypass");
 
       let incapsulaScriptUrl = null;
       let challengeScriptUrl = null;
@@ -618,13 +637,22 @@ class SimpleLoginBot {
         metadata.reese84UrlEndpoint = reese84UrlEndpoint;
       }
 
-      const solution = await this.captchaSolver.solve(
-        page.url(),
-        userAgent,
-        metadata,
-        currentProxy,
-        options
-      );
+      console.log("🧩 Invoking CapMonster solver...");
+      let solution;
+      try {
+        solution = await this.captchaSolver.solve(
+          page.url(),
+          userAgent,
+          metadata,
+          currentProxy,
+          options
+        );
+      } catch (error) {
+        if (!error.bypassStage) {
+          error.bypassStage = "solver";
+        }
+        throw error;
+      }
 
       console.log("✅ CapMonster solution received");
 
@@ -677,11 +705,22 @@ class SimpleLoginBot {
       await this.visualPause("after bypass navigation");
 
       const pageContent = await page.content();
+      const pageTitle = await page.title().catch(() => "");
+      const pageTextPreview = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "").catch(() => "");
+      const activeImpervaCookies = (await page.context().cookies())
+        .filter((cookie) => /^(incap_ses_|visid_incap_|___utmvc|reese84|nlbi_|incap_sh_)/.test(cookie.name))
+        .map((cookie) => `${cookie.name}=${cookie.value.substring(0, 80)}`);
+
+      console.log(`📄 Post-bypass title: ${pageTitle || "empty"}`);
+      console.log(`📄 Post-bypass URL: ${page.url()}`);
+      console.log(`📄 Post-bypass text preview: ${pageTextPreview || "empty"}`);
+      console.log(`🍪 Post-bypass cookies: ${activeImpervaCookies.join(", ") || "none"}`);
+
       if (pageContent.includes("Access Denied") || pageContent.includes("Error 15") || pageContent.includes("Error 16")) {
         const errorMatch = pageContent.match(/Error (\d+)/);
         const errorNum = errorMatch ? errorMatch[1] : "unknown";
         console.log(`🚫 DVSA Access Denied (Error ${errorNum}) — IP заблокирован`);
-        throw new ProxyBlockedError(`DVSA заблокировал IP (Error ${errorNum}). Нужна ротация прокси.`);
+        throw this.createProxyBlockedError(`DVSA заблокировал IP (Error ${errorNum}). Нужна ротация прокси.`, "after_solver");
       }
 
       const stillBlocked = await this.checkForIncapsula(page);
@@ -690,43 +729,29 @@ class SimpleLoginBot {
         const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 300));
         console.log(`📄 Контент страницы: ${bodyText}`);
         console.log(`📄 Bypass metadata: scriptBase64=${metadata.incapsulaScriptBase64 ? "present" : "missing"} reese=${metadata.reese84UrlEndpoint || "none"}`);
-        this.#throwIfProxyBlockedHtml(pageContent);
+        this.#throwIfProxyBlockedHtml(pageContent, "after_solver");
         throw new Error("Incapsula bypass не удался — challenge всё ещё присутствует после инъекции cookies");
       }
 
       console.log("✅ Incapsula bypass успешен!");
     } catch (error) {
-      console.error("❌ Ошибка обхода Incapsula:", error.message);
+      console.error(`❌ Ошибка обхода Incapsula [stage=${error?.bypassStage || "unknown"}]:`, error.message);
       throw error;
     }
   }
 
-  #throwIfProxyBlockedHtml(html) {
-    if (!html || typeof html !== "string") {
+  #throwIfProxyBlockedHtml(html, bypassStage = "before_solver") {
+    const pageType = this.#classifyIncapsulaHtml(html);
+    if (!pageType) {
       return;
     }
 
-    const hasSolvableChallengeMarker =
-      html.includes("_Incapsula_Resource?SWJIYLWA=") ||
-      html.includes("SWJIYLWA=");
-
-    if (hasSolvableChallengeMarker) {
+    if (pageType === "captcha") {
       return;
     }
 
-    const blockedMarkers = [
-      "CWUDNSAI=",
-      "edet=15",
-      "edet=16",
-      "incident_id=",
-      "[Error Title]",
-      "Request unsuccessful. Incapsula incident ID",
-      "Error 15",
-      "Error 16"
-    ];
-
-    if (blockedMarkers.some((marker) => html.includes(marker))) {
-      throw new ProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.");
+    if (pageType === "blocked") {
+      throw this.createProxyBlockedError("DVSA/Incapsula blocked the current proxy. Rotate proxy and restart the profile.", bypassStage);
     }
   }
 

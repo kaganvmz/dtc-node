@@ -27,8 +27,8 @@ export class ImpervaBypassSolver {
    */
   async getBalance() {
     try {
-      const balance = await this.client.getBalance();
-      return balance;
+      const response = await this.client.getBalance();
+      return response.balance;
     } catch (error) {
       throw new CaptchaSolverException(`Balance check failed: ${error.message}`);
     }
@@ -46,10 +46,22 @@ export class ImpervaBypassSolver {
     try {
       const normalizedProxy = await this.#normalizeProxy(proxy);
       const forceLegacy = options.forceLegacy === true;
+      const canUseLegacyFallback = Boolean(metadata.incapsulaScriptUrl && metadata.incapsulaCookies);
 
       if (forceLegacy) {
         console.log("⚠️ Forcing legacy Imperva REST payload...");
         return await this.#solveWithLegacyRest(websiteURL, userAgent, metadata, normalizedProxy);
+      }
+
+      if (canUseLegacyFallback) {
+        console.log("🛡️ Using legacy-first Imperva flow...");
+        try {
+          return await this.#solveWithLegacyRest(websiteURL, userAgent, metadata, normalizedProxy);
+        } catch (legacyError) {
+          const legacyMsg = legacyError.message || String(legacyError);
+          console.log(`⚠️ Legacy Imperva flow failed, retrying with SDK: ${legacyMsg}`);
+          return await this.#solveWithSdk(websiteURL, userAgent, metadata, normalizedProxy);
+        }
       }
 
       try {
@@ -60,7 +72,6 @@ export class ImpervaBypassSolver {
           msg.includes('CapMonster returned error: "Unknown"') ||
           msg.includes("CapMonster returned error: Unknown") ||
           msg.includes("Unexpected CapMonster solution shape");
-        const canUseLegacyFallback = Boolean(metadata.incapsulaScriptUrl && metadata.incapsulaCookies);
 
         if (!shouldFallback || !canUseLegacyFallback) {
           throw error;
@@ -77,10 +88,10 @@ export class ImpervaBypassSolver {
 
       const msg = error.message || String(error);
 
-      if (msg.includes("ERROR_KEY_DOES_NOT_EXIST")) {
+      if (msg.includes("KEY_DOES_NOT_EXIST")) {
         throw new CaptchaSolverWrongKeyException("Invalid CapMonster API key");
       }
-      if (msg.includes("ERROR_ZERO_BALANCE")) {
+      if (msg.includes("ZERO_BALANCE")) {
         throw new CaptchaSolverZeroBalanceException("CapMonster balance is zero");
       }
       if (msg.includes("TIMEOUT") || msg.includes("timeout")) {
@@ -224,6 +235,13 @@ export class ImpervaBypassSolver {
   }
 
   async #normalizeProxy(proxy) {
+    const supportedProxyTypes = new Set(["http", "https", "socks4", "socks5"]);
+    const proxyType = String(proxy?.type || "").toLowerCase();
+
+    if (!supportedProxyTypes.has(proxyType)) {
+      throw new CaptchaSolverException(`Unsupported proxy type for CapMonster: ${proxy?.type || "missing"}`);
+    }
+
     let proxyAddress = proxy.host;
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(proxy.host) && !proxy.host.includes(":")) {
       try {
@@ -235,7 +253,7 @@ export class ImpervaBypassSolver {
     }
 
     return {
-      proxyType: proxy.type === "socks5" ? "socks5" : "http",
+      proxyType,
       proxyAddress,
       proxyPort: proxy.port,
       proxyLogin: proxy.username,

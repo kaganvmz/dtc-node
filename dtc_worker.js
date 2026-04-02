@@ -60,6 +60,35 @@ class DtcLoginWorker extends SimpleLoginBot {
     };
   }
 
+  isProxyBlockedResult(errorCode) {
+    return errorCode === "proxy_blocked"
+      || errorCode === "proxy_blocked_before_solver"
+      || errorCode === "proxy_blocked_after_solver"
+      || errorCode === "proxy_blocked_after_rotations";
+  }
+
+  classifyBypassError(error) {
+    if (error instanceof ProxyBlockedError) {
+      return error.bypassStage === "after_solver"
+        ? "proxy_blocked_after_solver"
+        : "proxy_blocked_before_solver";
+    }
+
+    if (error?.bypassStage === "solver") {
+      return "capmonster_failed";
+    }
+
+    return "captcha_failed";
+  }
+
+  buildBypassFailureResult(error) {
+    return {
+      success: false,
+      error: this.classifyBypassError(error),
+      message: error.message
+    };
+  }
+
   async attemptBypassWithRetries(page, stageLabel) {
     let lastError = null;
 
@@ -76,7 +105,7 @@ class DtcLoginWorker extends SimpleLoginBot {
         return;
       } catch (error) {
         lastError = error;
-        console.warn(`⚠️ ${stageLabel}: bypass не удался на попытке ${attempt}: ${error.message}`);
+        console.warn(`⚠️ ${stageLabel}: bypass не удался на попытке ${attempt} [stage=${error?.bypassStage || "unknown"}]: ${error.message}`);
 
         if (error instanceof ProxyBlockedError) {
           break;
@@ -102,6 +131,8 @@ class DtcLoginWorker extends SimpleLoginBot {
 
   async restartProfileWithRotatedProxy(profileId, browser) {
     console.log("🔄 Proxy blocked. Rotating proxy and restarting profile...");
+    const proxyBeforeRotation = this.multiloginAPI.getCurrentProxy();
+    console.log(`📤 Proxy before rotation: ${proxyBeforeRotation.type}://${proxyBeforeRotation.host}:${proxyBeforeRotation.port}`);
 
     try {
       if (browser) {
@@ -135,6 +166,7 @@ class DtcLoginWorker extends SimpleLoginBot {
     console.log("✅ Profile proxy updated after rotation");
     const restartedBrowser = await this.launchBrowser(profileId);
     const page = await this.navigateToPage(restartedBrowser);
+    await this.logBrowserExternalIp(page, "after proxy rotation");
 
     return { browser: restartedBrowser, page };
   }
@@ -294,19 +326,7 @@ class DtcLoginWorker extends SimpleLoginBot {
             };
           }
         } catch (error) {
-          if (error instanceof ProxyBlockedError) {
-            return {
-              success: false,
-              error: "proxy_blocked",
-              message: error.message
-            };
-          }
-
-          return {
-            success: false,
-            error: "captcha_failed",
-            message: error.message
-          };
+          return this.buildBypassFailureResult(error);
         }
       }
 
@@ -373,19 +393,7 @@ class DtcLoginWorker extends SimpleLoginBot {
             };
           }
         } catch (error) {
-          if (error instanceof ProxyBlockedError) {
-            return {
-              success: false,
-              error: "proxy_blocked",
-              message: error.message
-            };
-          }
-
-          return {
-            success: false,
-            error: "captcha_failed",
-            message: error.message
-          };
+          return this.buildBypassFailureResult(error);
         }
       }
 
@@ -428,19 +436,7 @@ class DtcLoginWorker extends SimpleLoginBot {
           await this.attemptBypassWithRetries(page, "Post-manage");
           await this.sleep(3000);
         } catch (error) {
-          if (error instanceof ProxyBlockedError) {
-            return {
-              success: false,
-              error: "proxy_blocked",
-              message: error.message
-            };
-          }
-
-          return {
-            success: false,
-            error: "captcha_failed",
-            message: error.message
-          };
+          return this.buildBypassFailureResult(error);
         }
       }
 
@@ -517,11 +513,7 @@ class DtcLoginWorker extends SimpleLoginBot {
                   };
                   console.log("⚠️ Proxy rotation limit reached during initial recovery");
                 } else {
-                  loginResult = {
-                    success: false,
-                    error: "proxy_blocked",
-                    message: error.message
-                  };
+                  loginResult = this.buildBypassFailureResult(error);
                 }
               } else if (error.message.includes('CapMonster returned error: "Unknown"')) {
                 console.log("🔄 Refreshing challenge page for forced legacy retry after proxy rotation...");
@@ -543,11 +535,7 @@ class DtcLoginWorker extends SimpleLoginBot {
                       };
                       console.log("⚠️ Proxy rotation limit reached during forced legacy recovery");
                     } else {
-                      loginResult = {
-                        success: false,
-                        error: "proxy_blocked",
-                        message: legacyError.message
-                      };
+                      loginResult = this.buildBypassFailureResult(legacyError);
                     }
                   } else {
                     throw legacyError;
@@ -561,13 +549,13 @@ class DtcLoginWorker extends SimpleLoginBot {
         }
       }
 
-      if (loginResult?.error === "proxy_blocked_after_rotations" || loginResult?.error === "proxy_blocked") {
+      if (this.isProxyBlockedResult(loginResult?.error)) {
         await this.dtcLoginAPI.failDtcLogin(task.id, {
           licence_number: loginData.username,
           theory_test_ref: loginData.password,
           error: loginResult.error === "proxy_blocked_after_rotations"
             ? `proxy_blocked_after_rotations: ${loginResult.message || "Proxy rotation limit reached"}`
-            : `proxy_blocked: ${loginResult.message || "DVSA/Incapsula blocked the current proxy"}`
+            : `${loginResult.error}: ${loginResult.message || "DVSA/Incapsula blocked the current proxy"}`
         });
         console.log(`❌ DTC login ${task.id} marked as failed`);
         return;
@@ -590,7 +578,7 @@ class DtcLoginWorker extends SimpleLoginBot {
           return;
         }
 
-        if (loginResult.error !== "proxy_blocked" || verificationAttempt >= 2) {
+        if (!this.isProxyBlockedResult(loginResult.error) || verificationAttempt >= 2) {
           break;
         }
 
@@ -616,11 +604,7 @@ class DtcLoginWorker extends SimpleLoginBot {
             await this.attemptBypassWithRetries(page, "Verification recovery");
           } catch (error) {
             if (error instanceof ProxyBlockedError) {
-              loginResult = {
-                success: false,
-                error: "proxy_blocked",
-                message: error.message
-              };
+              loginResult = this.buildBypassFailureResult(error);
               break;
             }
 
@@ -634,8 +618,8 @@ class DtcLoginWorker extends SimpleLoginBot {
         theory_test_ref: loginData.password,
         error: loginResult?.error === "proxy_blocked_after_rotations"
           ? `proxy_blocked_after_rotations: ${loginResult?.message || "Proxy rotation limit reached"}`
-          : loginResult?.error === "proxy_blocked"
-          ? `proxy_blocked: ${loginResult?.message || "DVSA/Incapsula blocked the current proxy"}`
+          : this.isProxyBlockedResult(loginResult?.error)
+          ? `${loginResult?.error}: ${loginResult?.message || "DVSA/Incapsula blocked the current proxy"}`
           : (loginResult?.message || loginResult?.error || "DTC login verification failed")
       });
       console.log(`❌ DTC login ${task.id} marked as failed`);
